@@ -40,8 +40,9 @@ ln -sfn "$PWD/prompt-panel/extensions/prompt-panel.ts" ~/.pi/agent/extensions/pr
 ```
 
 Pi loads every `*.ts` in that directory, so the panel appears on the next `/reload` or new
-session. The package also carries a `pi.extensions` manifest, so it can be installed as a Pi
-package later.
+session. A symlink works: Pi resolves the import map for `@earendil-works/pi-tui` itself, so the
+repo does not need `node_modules` at runtime. The package also carries a `pi.extensions` manifest,
+so it can be installed as a Pi package later.
 
 Requires Pi **1.5.0+**. Non-interactive modes (`--print`, JSON, RPC) are a no-op.
 
