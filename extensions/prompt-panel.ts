@@ -26,15 +26,18 @@ const WIDGET_KEY = "prompt-panel";
 const CONFIG_FILE = "prompt-panel.json";
 const HARD_MAX_ROWS = 48;
 // Retention bound only. Completed turns are tiny one-line records; the visible
-// depth is chosen at render time (pastTurns collapsed, everything expanded).
+// depth is chosen by `display` at render time.
 const MAX_RETAINED_TURNS = 500;
+/** How many completed turns `display: "compact"` keeps above the live one. */
+const COMPACT_PAST_TURNS = 2;
 
 export type GlyphMode = "unicode" | "ascii";
 
 export interface PanelConfig {
   enabled: boolean;
   maxRows: "auto" | number;
-  pastTurns: number;
+  /** How much of the run to show: see `DisplayMode`. */
+  display: DisplayMode;
   showPrompt: boolean;
   showThinking: boolean;
   thinkingPreviewChars: number;
@@ -44,14 +47,39 @@ export interface PanelConfig {
   pulseMs: number;
   /** How often the thinking preview advances; keeps the row from crawling per token. */
   thinkingMs: number;
-  /** always = args and results visible; follow = ctrl+o decides; never = one line per tool. */
-  expand: ExpandMode;
   /** full = keep the finished tree while idle; glyph = one summary row; hidden = nothing. */
   idleMode: IdleMode;
   glyphs: GlyphMode;
 }
 
-export type ExpandMode = "always" | "follow" | "never";
+/**
+ * How much of the run the panel shows.
+ *
+ * - `minimal`: the prompt and the live turn only.
+ * - `compact`: the live turn plus the previous two, one line per tool.
+ * - `expanded`: every retained turn, with tool arguments and result previews.
+ */
+export type DisplayMode = "minimal" | "compact" | "expanded";
+
+export const DISPLAY_MODES: readonly DisplayMode[] = Object.freeze([
+  "minimal",
+  "compact",
+  "expanded",
+]);
+
+export function isDisplayMode(value: unknown): value is DisplayMode {
+  return value === "minimal" || value === "compact" || value === "expanded";
+}
+
+/**
+ * How many completed turns a mode keeps above the live one. `expanded` returns
+ * Infinity, which every caller clamps to what the session still retains.
+ */
+export function pastTurnsFor(display: DisplayMode): number {
+  if (display === "minimal") return 0;
+  if (display === "compact") return COMPACT_PAST_TURNS;
+  return Number.POSITIVE_INFINITY;
+}
 
 /** What the panel shows once a run has settled and nothing is executing. */
 export type IdleMode = "full" | "glyph" | "hidden";
@@ -59,7 +87,7 @@ export type IdleMode = "full" | "glyph" | "hidden";
 export const DEFAULT_CONFIG: Readonly<PanelConfig> = Object.freeze({
   enabled: true,
   maxRows: "auto",
-  pastTurns: 2,
+  display: "compact",
   showPrompt: true,
   showThinking: true,
   thinkingPreviewChars: 60,
@@ -67,7 +95,6 @@ export const DEFAULT_CONFIG: Readonly<PanelConfig> = Object.freeze({
   tickMs: 200,
   pulseMs: 600,
   thinkingMs: 500,
-  expand: "follow",
   idleMode: "glyph",
   glyphs: "unicode",
 });
@@ -140,9 +167,9 @@ export interface PanelState {
   /** Rows scrolled up from the bottom of the panel; 0 = pinned to the newest. */
   scroll?: number;
   /**
-   * Extra retained turns revealed above the collapsed fold by scrolling up over
-   * the panel. Purely a viewport: 0 keeps the `pastTurns` depth, and expanding
-   * the panel shows every turn regardless.
+   * Extra retained turns revealed above the mode's depth by scrolling up over
+   * the panel. Purely a viewport: 0 keeps the mode's fold, and
+   * `display: "expanded"` shows every turn regardless.
    */
   peek?: number;
   pastTurns?: PastTurn[];
@@ -170,7 +197,6 @@ export interface PanelLayout {
 
 export interface PanelRenderOptions {
   config?: Partial<PanelConfig>;
-  expanded?: boolean;
   terminalRows?: number;
   /**
    * Reports the rendered window, so a host can map a click's local y onto the
@@ -293,14 +319,15 @@ export function parseConfig(input: unknown): ParseConfigResult {
       config.maxRows = value.maxRows;
     } else errors.push("maxRows must be \"auto\" or an integer from 1 to 48");
   }
-  if (hasOwn(value, "pastTurns")) {
-    if (
-      typeof value.pastTurns === "number" &&
-      Number.isInteger(value.pastTurns) &&
-      value.pastTurns >= 0
-    ) {
-      config.pastTurns = value.pastTurns;
-    } else errors.push("pastTurns must be a non-negative integer");
+  if (hasOwn(value, "display")) {
+    if (isDisplayMode(value.display)) config.display = value.display;
+    else errors.push('display must be "minimal", "compact", or "expanded"');
+  } else if (hasOwn(value, "expand") || hasOwn(value, "pastTurns")) {
+    // Compatibility with the old `expand`/`pastTurns` pair, so an existing
+    // file keeps its effective view instead of silently becoming `compact`.
+    if (value.expand === "always") config.display = "expanded";
+    else if (value.pastTurns === 0) config.display = "minimal";
+    else config.display = "compact";
   }
   if (hasOwn(value, "showPrompt")) {
     if (typeof value.showPrompt === "boolean") config.showPrompt = value.showPrompt;
@@ -332,15 +359,6 @@ export function parseConfig(input: unknown): ParseConfigResult {
     if (isIntegerInRange(value.thinkingMs, 50, 10000)) {
       config.thinkingMs = value.thinkingMs;
     } else errors.push("thinkingMs must be an integer from 50 to 10000");
-  }
-  if (hasOwn(value, "expand")) {
-    if (
-      value.expand === "always" ||
-      value.expand === "follow" ||
-      value.expand === "never"
-    ) {
-      config.expand = value.expand;
-    } else errors.push('expand must be "always", "follow", or "never"');
   }
   if (hasOwn(value, "idleMode")) {
     if (
@@ -396,12 +414,12 @@ export function settingsItems(config: PanelConfig): SettingItem[] {
       values: ON_OFF,
     },
     {
-      id: "expand",
-      label: "expand",
+      id: "display",
+      label: "display",
       description:
-        "follow lets ctrl+o decide, always keeps the expanded tree, never keeps one line per tool.",
-      currentValue: config.expand,
-      values: ["follow", "always", "never"],
+        "minimal is the live turn only, compact adds the previous two, expanded shows every retained turn with tool arguments and results.",
+      currentValue: config.display,
+      values: [...DISPLAY_MODES],
     },
     {
       id: "idleMode",
@@ -419,14 +437,6 @@ export function settingsItems(config: PanelConfig): SettingItem[] {
       currentValue:
         config.maxRows === "auto" ? "auto" : String(config.maxRows),
       values: ["auto", "6", "8", "12", "18", "24", "36", "48"],
-    },
-    {
-      id: "pastTurns",
-      label: "pastTurns",
-      description:
-        "Completed turns kept on screen while collapsed. Scrolling up over the panel reveals the rest.",
-      currentValue: String(config.pastTurns),
-      values: ["0", "1", "2", "3", "5", "8", "12", "20"],
     },
     {
       id: "showPrompt",
@@ -508,14 +518,13 @@ export function applySettingValue(
     case "maxRows":
       next.maxRows = value === "auto" ? "auto" : Number(value);
       break;
-    case "pastTurns":
     case "thinkingPreviewChars":
     case "tickMs":
     case "pulseMs":
     case "thinkingMs":
       next[id] = Number(value);
       break;
-    case "expand":
+    case "display":
     case "idleMode":
     case "glyphs":
       next[id] = value;
@@ -813,7 +822,7 @@ function shownPastTurns(
   const retained = Array.isArray(state.pastTurns) ? state.pastTurns.length : 0;
   if (expanded) return retained;
   const peek = Math.max(0, Math.floor(state.peek ?? 0));
-  return Math.min(retained, Math.max(0, Math.floor(config.pastTurns)) + peek);
+  return Math.min(retained, pastTurnsFor(config.display) + peek);
 }
 
 function formatTurnHeader(
@@ -1230,12 +1239,7 @@ export function renderPanel(
   );
   // Expanded content may grow past the collapsed budget, but it must never eat
   // most of the screen: cap it at 60% of the terminal, and at the hard ceiling.
-  const expanded =
-    config.expand === "always"
-      ? true
-      : config.expand === "never"
-        ? false
-        : options?.expanded === true;
+  const expanded = config.display === "expanded";
   // Rows scrolled up over the panel reveal more retained turns than the
   // collapsed fold keeps. Expanded already shows them all, so it ignores this.
   const peek = expanded ? 0 : Math.max(0, Math.floor(state.peek ?? 0));
@@ -1276,8 +1280,7 @@ export function renderPanel(
       : [];
   const content: string[] = [...promptBlock];
   const pastTurns = Array.isArray(state.pastTurns) ? state.pastTurns : [];
-  // `pastTurns` is the collapsed depth. Expanding the panel (ctrl+o, or
-  // `expand: "always"`) reveals every turn still retained in the session, and
+  // The mode sets the depth: `expanded` shows every retained turn, and
   // scrolling up over a panel that fits reveals them one fold at a time.
   const shownPast = shownPastTurns(state, config, expanded);
   const visiblePast = shownPast <= 0 ? [] : pastTurns.slice(-shownPast);
@@ -1686,7 +1689,6 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
               state,
               {
                 config,
-                expanded: ctx.ui.getToolsExpanded(),
                 terminalRows: tui.terminal?.rows ?? process.stdout.rows ?? 24,
                 onLayout: (next) => {
                   layout = next;
@@ -1803,7 +1805,7 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
 
   function usage(ctx: ExtensionContext): void {
     ctx.ui.notify(
-      "Usage: /panel [on|off|status|rows <n|auto>|thinking on|off|idle full|glyph|hidden|ascii on|off|expand always|follow|never|reset]",
+      "Usage: /panel [on|off|status|display minimal|compact|expanded|rows <n|auto>|thinking on|off|idle full|glyph|hidden|ascii on|off|reset]",
       "warning",
     );
   }
@@ -1823,7 +1825,7 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
   function reportStatus(ctx: ExtensionContext): void {
     const dot = glyphsFor(config.glyphs).dot;
     ctx.ui.notify(
-      `prompt-panel: enabled=${config.enabled ? "on" : "off"} ${dot} rows=${describeBudget()} ${dot} expand=${config.expand} ${dot} idle=${config.idleMode} ${dot} ${configPath()}`,
+      `prompt-panel: enabled=${config.enabled ? "on" : "off"} ${dot} rows=${describeBudget()} ${dot} display=${config.display} ${dot} idle=${config.idleMode} ${dot} ${configPath()}`,
       "info",
     );
   }
@@ -2315,17 +2317,12 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
         return;
       }
 
-      if (command === "expand") {
-        if (
-          words.length !== 2 ||
-          (words[1] !== "always" &&
-            words[1] !== "follow" &&
-            words[1] !== "never")
-        ) {
+      if (command === "display") {
+        if (words.length !== 2 || !isDisplayMode(words[1])) {
           usage(ctx);
           return;
         }
-        config.expand = words[1];
+        config.display = words[1];
         persist(ctx);
         scheduleRender();
         return;

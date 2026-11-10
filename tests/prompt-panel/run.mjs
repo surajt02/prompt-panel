@@ -35,8 +35,11 @@ try {
 
 const {
   DEFAULT_CONFIG,
+  DISPLAY_MODES,
   applySettingValue,
+  isDisplayMode,
   parseConfig,
+  pastTurnsFor,
   effectiveRowBudget,
   middleEllipsize,
   formatDuration,
@@ -46,9 +49,9 @@ const {
   settingsItems,
 } = mod;
 
-// Collapsed baseline: the shipped default is expand:"always", but these cases
-// assert exact row budgets, so they pin the collapsed layout explicitly.
-const COLLAPSED = { ...DEFAULT_CONFIG, expand: "never" };
+// Compact baseline: the shipped default mode, pinned explicitly so row-budget
+// cases do not silently follow a default change.
+const COMPACT_MODE = { ...DEFAULT_CONFIG, display: "compact" };
 
 let failures = 0;
 function check(name, cond, extra = "") {
@@ -155,12 +158,15 @@ function describeOverflow(lines, width) {
 {
   const expected = [
     "DEFAULT_CONFIG",
+    "DISPLAY_MODES",
     "applySettingValue",
     "countEditDiff",
     "effectiveRowBudget",
     "formatDuration",
+    "isDisplayMode",
     "middleEllipsize",
     "parseConfig",
+    "pastTurnsFor",
     "renderPanel",
     "settingsItems",
     "summarizeToolArgs",
@@ -194,7 +200,7 @@ function describeOverflow(lines, width) {
     JSON.stringify({
       enabled: false,
       maxRows: 12,
-      pastTurns: 0,
+      display: "minimal",
       showPrompt: false,
       showThinking: false,
       thinkingPreviewChars: 20,
@@ -209,7 +215,7 @@ function describeOverflow(lines, width) {
     !result.error &&
       result.config.enabled === false &&
       result.config.maxRows === 12 &&
-      result.config.pastTurns === 0 &&
+      result.config.display === "minimal" &&
       result.config.showPrompt === false &&
       result.config.showThinking === false &&
       result.config.thinkingPreviewChars === 20 &&
@@ -232,7 +238,7 @@ for (const [label, value] of [
   ["broken JSON", "{"],
   ["maxRows 0", { maxRows: 0 }],
   ["maxRows 49", { maxRows: 49 }],
-  ["pastTurns -1", { pastTurns: -1 }],
+  ["display sometimes", { display: "sometimes" }],
   ["tickMs 0", { tickMs: 0 }],
   ["glyphs nope", { glyphs: "nope" }],
   ["idleMode sometimes", { idleMode: "sometimes" }],
@@ -249,9 +255,45 @@ for (const [label, value] of [
   );
 }
 
+{
+  check(
+    "parseConfig: display defaults to compact",
+    parseConfig({}).config.display === "compact",
+    JSON.stringify(parseConfig({})),
+  );
+  const legacy = [
+    [{ expand: "always" }, "expanded"],
+    [{ expand: "follow" }, "compact"],
+    [{ expand: "never" }, "compact"],
+    [{ pastTurns: 0 }, "minimal"],
+    [{ pastTurns: 8 }, "compact"],
+    [{ display: "minimal", expand: "always" }, "minimal"],
+  ];
+  check(
+    "parseConfig: the old expand/pastTurns pair still maps to a mode",
+    legacy.every(
+      ([input, expected]) => parseConfig(input).config.display === expected,
+    ),
+    JSON.stringify(legacy.map(([input]) => parseConfig(input).config.display)),
+  );
+  check(
+    "pastTurnsFor: minimal none, compact two, expanded everything",
+    pastTurnsFor("minimal") === 0 &&
+      pastTurnsFor("compact") === 2 &&
+      pastTurnsFor("expanded") === Number.POSITIVE_INFINITY,
+  );
+  check(
+    "isDisplayMode accepts exactly the three modes",
+    DISPLAY_MODES.length === 3 &&
+      DISPLAY_MODES.every((mode) => isDisplayMode(mode)) &&
+      !isDisplayMode("always") &&
+      !isDisplayMode(undefined),
+  );
+}
+
 // ---- row budget ------------------------------------------------------------
 {
-  const auto = { ...COLLAPSED, maxRows: "auto" };
+  const auto = { ...COMPACT_MODE, maxRows: "auto" };
   check(
     "effectiveRowBudget: auto clamps to 6..18",
     effectiveRowBudget(auto, 10) === 6 &&
@@ -264,9 +306,9 @@ for (const [label, value] of [
   );
   check(
     "effectiveRowBudget: numeric override clamps to 1..48",
-    effectiveRowBudget({ ...COLLAPSED, maxRows: 0 }, 24) === 1 &&
-      effectiveRowBudget({ ...COLLAPSED, maxRows: 52 }, 24) === 48 &&
-      effectiveRowBudget({ ...COLLAPSED, maxRows: 9 }, 24) === 9,
+    effectiveRowBudget({ ...COMPACT_MODE, maxRows: 0 }, 24) === 1 &&
+      effectiveRowBudget({ ...COMPACT_MODE, maxRows: 52 }, 24) === 48 &&
+      effectiveRowBudget({ ...COMPACT_MODE, maxRows: 9 }, 24) === 9,
   );
 }
 
@@ -377,7 +419,7 @@ check(
 for (const width of [10, 40, 60, 200]) {
   const lines = renderPanel(
     makeState(),
-    { config: { ...COLLAPSED, maxRows: 18 }, terminalRows: 24 },
+    { config: { ...COMPACT_MODE, maxRows: 18 }, terminalRows: 24 },
     width,
     theme,
   );
@@ -390,7 +432,7 @@ for (const width of [10, 40, 60, 200]) {
 {
   const lines = renderPanel(
     makeState(),
-    { config: { ...COLLAPSED, maxRows: 18 } },
+    { config: { ...COMPACT_MODE, maxRows: 18 } },
     60,
     theme,
   );
@@ -402,7 +444,7 @@ for (const width of [10, 40, 60, 200]) {
   );
   const longPathLines = renderPanel(
     makeState(),
-    { config: { ...COLLAPSED, maxRows: 18 } },
+    { config: { ...COMPACT_MODE, maxRows: 18 } },
     50,
     theme,
   );
@@ -423,7 +465,7 @@ for (const width of [10, 40, 60, 200]) {
 {
   const lines = renderPanel(
     makeState(),
-    { config: { ...COLLAPSED, maxRows: 18 } },
+    { config: { ...COMPACT_MODE, maxRows: 18 } },
     40,
     theme,
   );
@@ -442,7 +484,7 @@ for (const width of [10, 40, 60, 200]) {
 {
   const lines = renderPanel(
     makeState(),
-    { config: { ...COLLAPSED, maxRows: 18 } },
+    { config: { ...COMPACT_MODE, maxRows: 18 } },
     30,
     theme,
   );
@@ -482,7 +524,7 @@ for (const width of [10, 40, 60, 200]) {
   });
   const lines = renderPanel(
     state,
-    { config: { ...COLLAPSED, maxRows: 6 }, terminalRows: 24 },
+    { config: { ...COMPACT_MODE, maxRows: 6 }, terminalRows: 24 },
     80,
     theme,
   );
@@ -544,8 +586,7 @@ for (const width of [10, 40, 60, 200]) {
   const lines = renderPanel(
     state,
     {
-      config: { ...COLLAPSED, maxRows: 6, expand: "follow" },
-      expanded: true,
+      config: { ...COMPACT_MODE, maxRows: 6, display: "expanded" },
       terminalRows: 24,
     },
     40,
@@ -603,8 +644,7 @@ for (const width of [10, 40, 60, 200]) {
   const lines = renderPanel(
     state,
     {
-      config: { ...COLLAPSED, maxRows: 18, expand: "follow" },
-      expanded: true,
+      config: { ...COMPACT_MODE, maxRows: 18, display: "expanded" },
       terminalRows: 24,
     },
     80,
@@ -628,7 +668,7 @@ for (const width of [10, 40, 60, 200]) {
   const lines = renderPanel(
     state,
     {
-      config: { ...COLLAPSED, glyphs: "ascii", maxRows: 18 },
+      config: { ...COMPACT_MODE, glyphs: "ascii", maxRows: 18 },
       terminalRows: 24,
     },
     80,
@@ -661,8 +701,7 @@ for (const width of [10, 40, 60, 200]) {
     const lines = renderPanel(
       state,
       {
-        config: { ...COLLAPSED, maxRows: 18, expand: "follow" },
-        expanded: true,
+        config: { ...COMPACT_MODE, maxRows: 18, display: "expanded" },
         terminalRows: 24,
       },
       width,
@@ -680,7 +719,7 @@ for (const width of [10, 40, 60, 200]) {
 {
   const lines = renderPanel(
     makeState(),
-    { config: { ...COLLAPSED, maxRows: 18 }, terminalRows: 24 },
+    { config: { ...COMPACT_MODE, maxRows: 18 }, terminalRows: 24 },
     80,
     theme,
   );
@@ -696,7 +735,7 @@ for (const width of [10, 40, 60, 200]) {
           const state = makeState();
           renderPanel(
             state,
-            { config: { ...COLLAPSED, maxRows: 18 } },
+            { config: { ...COMPACT_MODE, maxRows: 18 } },
             80,
             theme,
           );
@@ -907,11 +946,18 @@ for (const width of [10, 40, 60, 200]) {
     );
     toolsExpanded = true;
     check(
-      "lifecycle: ctrl+o expands the idle glyph back to the full tree",
-      widget.render(80).length > 1,
+      "lifecycle: ctrl+o no longer overrides the mode's idle glyph",
+      widget.render(80).length === 1,
       JSON.stringify(widget.render(80)),
     );
     toolsExpanded = false;
+    await command.handler("display expanded", ctx);
+    check(
+      "lifecycle: /panel display expanded reveals the finished tree while idle",
+      widget.render(80).length > 1,
+      JSON.stringify(widget.render(80)),
+    );
+    await command.handler("display compact", ctx);
     await call("input", { source: "interactive", text: "third prompt" });
     check(
       "lifecycle: a new prompt expands the collapsed panel without a keypress",
@@ -996,20 +1042,20 @@ for (const width of [10, 40, 60, 200]) {
       JSON.stringify(saved),
     );
 
-    await command.handler("expand never", ctx);
+    await command.handler("display minimal", ctx);
     check(
-      "lifecycle: /panel expand persists the mode",
+      "lifecycle: /panel display persists the mode",
       JSON.parse(readFileSync(join(tempAgent, "prompt-panel.json"), "utf8"))
-        .expand === "never",
+        .display === "minimal",
     );
     const beforeInvalid = notifications.length;
-    await command.handler("expand sometimes", ctx);
+    await command.handler("display sometimes", ctx);
     check(
-      "lifecycle: /panel expand rejects an unknown mode without writing",
+      "lifecycle: /panel display rejects an unknown mode without writing",
       notifications.length > beforeInvalid &&
         notifications[notifications.length - 1].type === "warning" &&
         JSON.parse(readFileSync(join(tempAgent, "prompt-panel.json"), "utf8"))
-          .expand === "never",
+          .display === "minimal",
     );
 
     await command.handler("on", ctx);
@@ -1032,9 +1078,9 @@ for (const width of [10, 40, 60, 200]) {
 // assertion cannot catch a swallowed suffix or a silent mid-word chop.
 
 const plain = (line) => line.replace(/\x1b\[[0-9;]*m/g, "");
-const cfg = (overrides = {}) => ({ ...COLLAPSED, ...overrides });
+const cfg = (overrides = {}) => ({ ...COMPACT_MODE, ...overrides });
 const render = (state, config, width) =>
-  renderPanel(state, { config, expanded: false, terminalRows: 24 }, width, theme);
+  renderPanel(state, { config, terminalRows: 24 }, width, theme);
 
 // --- Run totals --------------------------------------------------------------
 // The collapsed row sums every turn of a run, not just the retained past turns.
@@ -1047,10 +1093,10 @@ const render = (state, config, width) =>
   process.env.PI_CODING_AGENT_DIR = tempAgent;
   Date.now = () => clock;
   try {
-    // pastTurns=1 so a 3-turn run outruns what the panel still retains.
+    // minimal, so a 3-turn run outruns what the panel still shows.
     writeFileSync(
       join(tempAgent, "prompt-panel.json"),
-      JSON.stringify({ pastTurns: 1, idleMode: "glyph" }),
+      JSON.stringify({ display: "minimal", idleMode: "glyph" }),
     );
     const handlers = new Map();
     let command;
@@ -1115,23 +1161,23 @@ const render = (state, config, width) =>
 
     await call("agent_settled", { aborted: false });
     check(
-      "run totals: sums turns, tools, and elapsed time beyond the pastTurns cap",
+      "run totals: sums turns, tools, and elapsed time beyond what the mode shows",
       glyph().trim() === "✓ 3 turns · 3 tools · 6.0s",
       glyph(),
     );
     await command.handler("idle full", ctx);
     check(
-      "run totals: the full panel still shows only the retained past turn",
-      rows().filter((line) => /turn \d+/.test(line)).length === 2,
+      "run totals: minimal keeps the tree to the live turn",
+      rows().filter((line) => /turn \d+/.test(line)).length === 1,
       JSON.stringify(rows()),
     );
-    await command.handler("expand always", ctx);
+    await command.handler("display expanded", ctx);
     check(
-      "run totals: expanding reveals every turn of the run, not just pastTurns",
+      "run totals: expanded reveals every turn of the run, not just the mode's depth",
       rows().filter((line) => /turn \d+/.test(line)).length === 3,
       JSON.stringify(rows()),
     );
-    await command.handler("expand follow", ctx);
+    await command.handler("display compact", ctx);
     await command.handler("idle glyph", ctx);
 
     await call("input", { source: "interactive", text: "second run" });
@@ -1277,7 +1323,7 @@ for (const glyphs of ["unicode", "ascii"]) {
     ],
     currentTurn: { ...makeState().currentTurn, number: 9 },
   });
-  const lines = render(state, cfg({ pastTurns: 2, maxRows: 18 }), 80).map(plain);
+  const lines = render(state, cfg({ display: "compact", maxRows: 18 }), 80).map(plain);
   const zeroToolRow = lines.find((line) => line.includes("turn 7")) ?? "";
   check(
     "past turns without tool calls keep their row but omit the count",
@@ -1320,54 +1366,27 @@ for (const glyphs of ["unicode", "ascii"]) {
 
 {
   const base = makeState();
-  const render = (config, expanded) =>
-    renderPanel(
-      base,
-      { config, expanded, terminalRows: 40 },
-      100,
-      theme,
-    ).map(plain);
-
-  const always = render({ ...DEFAULT_CONFIG, expand: "always", maxRows: 18 }, false);
-  check(
-    "expand=always shows arguments even when ctrl+o is off",
-    always.some((line) => line.includes('"path"')),
-    JSON.stringify(always.slice(0, 6)),
-  );
-
-  check(
-    "the shipped default follows ctrl+o instead of forcing expansion",
-    DEFAULT_CONFIG.expand === "follow",
-    String(DEFAULT_CONFIG.expand),
-  );
-  check(
-    "the default config collapses when ctrl+o is off",
-    !render({ ...DEFAULT_CONFIG, maxRows: 18 }, false).some((line) =>
+  const render = (config) =>
+    renderPanel(base, { config, terminalRows: 40 }, 100, theme).map(plain);
+  const showsArgs = (config) =>
+    render({ ...DEFAULT_CONFIG, ...config, maxRows: 18 }).some((line) =>
       line.includes('"path"'),
-    ),
-  );
-  check(
-    "the default config expands when ctrl+o is on",
-    render({ ...DEFAULT_CONFIG, maxRows: 18 }, true).some((line) =>
-      line.includes('"path"'),
-    ),
-  );
+    );
 
-  const followOff = render({ ...DEFAULT_CONFIG, expand: "follow", maxRows: 18 }, false);
-  const followOn = render({ ...DEFAULT_CONFIG, expand: "follow", maxRows: 18 }, true);
   check(
-    "expand=follow collapses when ctrl+o is off",
-    !followOff.some((line) => line.includes('"path"')),
+    "display=expanded shows tool arguments",
+    showsArgs({ display: "expanded" }),
   );
   check(
-    "expand=follow expands when ctrl+o is on",
-    followOn.some((line) => line.includes('"path"')),
+    "the shipped default is compact, with one line per tool",
+    DEFAULT_CONFIG.display === "compact" &&
+      !("expand" in DEFAULT_CONFIG) &&
+      !showsArgs({}),
+    String(DEFAULT_CONFIG.display),
   );
-
-  const never = render({ ...DEFAULT_CONFIG, expand: "never", maxRows: 18 }, true);
   check(
-    "expand=never ignores the ctrl+o flag",
-    !never.some((line) => line.includes('"path"')),
+    "display=minimal also keeps tools on one line",
+    !showsArgs({ display: "minimal" }),
   );
 }
 
@@ -1393,7 +1412,7 @@ for (const glyphs of ["unicode", "ascii"]) {
   const countAt = (terminalRows) =>
     renderPanel(
       state,
-      { config: { ...DEFAULT_CONFIG }, expanded: true, terminalRows },
+      { config: { ...DEFAULT_CONFIG, display: "expanded" }, terminalRows },
       100,
       theme,
     ).length;
@@ -1417,7 +1436,7 @@ for (const glyphs of ["unicode", "ascii"]) {
   const glyphAt = (tick) => {
     const lines = renderPanel(
       makeState({ tick, queued: [], notices: [] }),
-      { config: { ...DEFAULT_CONFIG, expand: "never" }, terminalRows: 40 },
+      { config: { ...DEFAULT_CONFIG, display: "compact" }, terminalRows: 40 },
       100,
       theme,
     ).map(plain);
@@ -1448,7 +1467,7 @@ for (const glyphs of ["unicode", "ascii"]) {
     });
     const lines = renderPanel(
       state,
-      { config: { ...DEFAULT_CONFIG, expand: "never", ...config }, terminalRows: 40 },
+      { config: { ...DEFAULT_CONFIG, display: "compact", ...config }, terminalRows: 40 },
       100,
       theme,
     ).map(plain);
@@ -1534,7 +1553,7 @@ for (const glyphs of ["unicode", "ascii"]) {
   });
   const lines = renderPanel(
     state,
-    { config: { ...COLLAPSED, expand: "follow" }, expanded: true, terminalRows: 60 },
+    { config: { ...COMPACT_MODE, display: "expanded" }, terminalRows: 60 },
     100,
     theme,
   ).map(plain);
@@ -1568,44 +1587,32 @@ for (const glyphs of ["unicode", "ascii"]) {
     queued: [],
     notices: [],
   });
-  const view = (config, expanded, terminalRows = 100) =>
-    renderPanel(
-      state,
-      { config, expanded, terminalRows },
-      100,
-      theme,
-    ).map(plain);
+  const view = (config, terminalRows = 100) =>
+    renderPanel(state, { config, terminalRows }, 100, theme).map(plain);
   const turnRows = (rows) =>
     rows.filter((line) => /^\s+[✓✗●○] turn \d+/.test(line));
 
-  const collapsed = turnRows(view(cfg({ expand: "follow", pastTurns: 2 }), false));
+  const compact = turnRows(view(cfg({ display: "compact" })));
   check(
-    "collapsed: shows only the pastTurns newest past turns",
-    collapsed.length === 3 &&
-      collapsed.some((line) => line.includes("turn 6")) &&
-      !collapsed.some((line) => line.includes("turn 4")),
-    JSON.stringify(collapsed),
+    "compact: shows the live turn plus the previous two",
+    compact.length === 3 &&
+      compact.some((line) => line.includes("turn 6")) &&
+      !compact.some((line) => line.includes("turn 4")),
+    JSON.stringify(compact),
   );
+  const expandedTurns = turnRows(view(cfg({ display: "expanded" })));
   check(
     "expanded: reveals every retained turn plus the live one",
-    turnRows(view(cfg({ expand: "follow", pastTurns: 2 }), true)).length === 7 &&
-      turnRows(view(cfg({ expand: "follow", pastTurns: 2 }), true)).some((line) =>
-        line.includes("turn 1"),
-      ),
-    JSON.stringify(turnRows(view(cfg({ expand: "follow", pastTurns: 2 }), true))),
+    expandedTurns.length === 7 &&
+      expandedTurns.some((line) => line.includes("turn 1")),
+    JSON.stringify(expandedTurns),
   );
+  const minimalTurns = turnRows(view(cfg({ display: "minimal" })));
   check(
-    "expand=always reveals every turn without ctrl+o",
-    turnRows(view(cfg({ pastTurns: 2, expand: "always" }), false)).length === 7,
-  );
-  check(
-    "expand=never keeps the collapsed depth even when ctrl+o is on",
-    turnRows(view(cfg({ pastTurns: 2, expand: "never" }), true)).length === 3,
-  );
-  check(
-    "pastTurns=0 hides past turns collapsed and reveals them expanded",
-    turnRows(view(cfg({ expand: "follow", pastTurns: 0 }), false)).length === 1 &&
-      turnRows(view(cfg({ expand: "follow", pastTurns: 0 }), true)).length === 7,
+    "minimal: keeps only the live turn",
+    minimalTurns.length === 1 &&
+      minimalTurns.some((line) => line.includes("turn 7")),
+    JSON.stringify(minimalTurns),
   );
 
   // `peek` is the wheel's scrollback: extra retained turns above the collapsed
@@ -1614,12 +1621,12 @@ for (const glyphs of ["unicode", "ascii"]) {
     turnRows(
       renderPanel(
         { ...state, peek, ...stateOverrides },
-        { config, expanded: false, terminalRows: 100 },
+        { config, terminalRows: 100 },
         100,
         theme,
       ).map(plain),
     );
-  const peekConfig = cfg({ expand: "never", pastTurns: 2 });
+  const peekConfig = cfg({ display: "compact" });
   check(
     "peek: the collapsed fold hides the older retained turns",
     peekView(0, peekConfig).length === 3 &&
@@ -1644,7 +1651,7 @@ for (const glyphs of ["unicode", "ascii"]) {
     turnRows(
       renderPanel(
         { ...state, peek: 4 },
-        { config: cfg({ expand: "follow", pastTurns: 2 }), expanded: true, terminalRows: 100 },
+        { config: cfg({ display: "expanded" }), terminalRows: 100 },
         100,
         theme,
       ).map(plain),
@@ -1654,13 +1661,13 @@ for (const glyphs of ["unicode", "ascii"]) {
     "peek: an idle glyph row is a way back into the tree",
     renderPanel(
       { ...state, phase: "idle", peek: 0, currentTurn: { ...state.currentTurn, completed: true } },
-      { config: cfg({ idleMode: "glyph", pastTurns: 2 }), expanded: false, terminalRows: 100 },
+      { config: cfg({ idleMode: "glyph" }), terminalRows: 100 },
       100,
       theme,
     ).map(plain).length === 1 &&
       renderPanel(
         { ...state, phase: "idle", peek: 1, currentTurn: { ...state.currentTurn, completed: true } },
-        { config: cfg({ idleMode: "glyph", pastTurns: 2 }), expanded: false, terminalRows: 100 },
+        { config: cfg({ idleMode: "glyph" }), terminalRows: 100 },
         100,
         theme,
       ).map(plain).length > 1,
@@ -1679,8 +1686,7 @@ for (const glyphs of ["unicode", "ascii"]) {
   const folded = renderPanel(
     many,
     {
-      config: cfg({ expand: "follow", pastTurns: 2 }),
-      expanded: true,
+      config: cfg({ display: "expanded" }),
       terminalRows: 24,
     },
     100,
@@ -1712,7 +1718,7 @@ for (const glyphs of ["unicode", "ascii"]) {
     notices: [],
   });
 
-  const collapsed = render(base, cfg({ pastTurns: 0 }), 60).map(plain);
+  const collapsed = render(base, cfg({ display: "minimal" }), 60).map(plain);
   check(
     "prompt: collapsed shows one ellipsized row",
     collapsed.length === 1 &&
@@ -1725,8 +1731,7 @@ for (const glyphs of ["unicode", "ascii"]) {
   const expandedLines = renderPanel(
     { ...base, promptExpanded: true },
     {
-      config: cfg({ pastTurns: 0 }),
-      expanded: false,
+      config: cfg({ display: "minimal" }),
       terminalRows: 40,
       onLayout: (layout) => {
         promptLayout = layout;
@@ -1758,7 +1763,7 @@ for (const glyphs of ["unicode", "ascii"]) {
 
   const multiParagraph = renderPanel(
     { ...base, prompt: "first ask\n\nsecond paragraph with detail", promptExpanded: true },
-    { config: cfg({ pastTurns: 0 }), expanded: false, terminalRows: 40 },
+    { config: cfg({ display: "minimal" }), terminalRows: 40 },
     60,
     theme,
   ).map(plain);
@@ -1781,8 +1786,7 @@ for (const glyphs of ["unicode", "ascii"]) {
     const lines = renderPanel(
       { ...hugeState, scroll },
       {
-        config: cfg({ pastTurns: 0, maxRows: 5 }),
-        expanded: false,
+        config: cfg({ display: "minimal", maxRows: 5 }),
         terminalRows: 24,
         onLayout: (next) => {
           layout = next;
@@ -1833,15 +1837,14 @@ for (const glyphs of ["unicode", "ascii"]) {
 
   check(
     "prompt: a new prompt renders collapsed by default",
-    render(base, cfg({ pastTurns: 0 }), 60).length === 1,
+    render(base, cfg({ display: "minimal" }), 60).length === 1,
   );
 
   let idleLayout;
   renderPanel(
     { ...base, phase: "idle", currentTurn: null, run: null, promptExpanded: true },
     {
-      config: cfg({ pastTurns: 0 }),
-      expanded: false,
+      config: cfg({ display: "minimal" }),
       terminalRows: 40,
       onLayout: (layout) => {
         idleLayout = layout;
@@ -2069,8 +2072,7 @@ for (const glyphs of ["unicode", "ascii"]) {
     join(tempAgent, "prompt-panel.json"),
     JSON.stringify({
       maxRows: 20,
-      pastTurns: 1,
-      expand: "never",
+      display: "minimal",
       idleMode: "full",
       animate: false,
     }),
@@ -2137,12 +2139,17 @@ for (const glyphs of ["unicode", "ascii"]) {
     call("agent_settled", { aborted: false });
 
     check(
-      "peek: a fitting panel shows only the collapsed depth",
-      turnNumbers() === "2,3",
+      "peek: minimal shows only the live turn",
+      turnNumbers() === "3",
       turnNumbers(),
     );
     check(
-      "peek: the wheel unfolds an older turn instead of scrolling the transcript",
+      "peek: the wheel unfolds the newest past turn instead of scrolling the transcript",
+      wheel(-1) !== undefined && turnNumbers() === "2,3",
+      JSON.stringify(rows()),
+    );
+    check(
+      "peek: wheeling up again reaches the oldest retained turn",
       wheel(-1) !== undefined && turnNumbers() === "1,2,3",
       JSON.stringify(rows()),
     );
@@ -2152,12 +2159,15 @@ for (const glyphs of ["unicode", "ascii"]) {
       JSON.stringify(rows()),
     );
     check(
-      "peek: wheeling back down folds the revealed turns away",
-      wheel(1) !== undefined && turnNumbers() === "2,3",
+      "peek: wheeling back down folds the revealed turns away one at a time",
+      wheel(1) !== undefined &&
+        turnNumbers() === "2,3" &&
+        wheel(1) !== undefined &&
+        turnNumbers() === "3",
       JSON.stringify(rows()),
     );
     check(
-      "peek: the compact view still lets the transcript scroll",
+      "peek: the folded view still lets the transcript scroll",
       wheel(1) === undefined,
     );
 
@@ -2171,7 +2181,7 @@ for (const glyphs of ["unicode", "ascii"]) {
       "peek: wheeling up over the glyph brings the tree back",
       wheel(-1) !== undefined &&
         rows().length > 1 &&
-        rows().some((line) => line.includes("turn 1")),
+        rows().some((line) => line.includes("turn 2")),
       JSON.stringify(rows()),
     );
     check(
@@ -2185,13 +2195,15 @@ for (const glyphs of ["unicode", "ascii"]) {
     wheel(-1);
     check(
       "peek: revealing survived into the next prompt reset",
-      turnNumbers() === "1,2,3",
+      turnNumbers() === "2,3",
       turnNumbers(),
     );
     call("input", { source: "interactive", text: "a second ask" });
     check(
-      "peek: a new prompt starts folded again",
-      turnNumbers() === "3" && !rows().some((line) => line.includes("turn 1")),
+      "peek: a new prompt starts folded, with no history above the live turn",
+      turnNumbers() === "" &&
+        rows().length === 1 &&
+        rows()[0].includes("a second ask"),
       JSON.stringify(rows()),
     );
 
@@ -2252,35 +2264,26 @@ for (const glyphs of ["unicode", "ascii"]) {
     "expanding the glyph reveals the full panel instead of the one row",
     renderPanel(
       finishedState(),
-      { config: cfg({ expand: "follow" }), expanded: true, terminalRows: 24 },
+      { config: cfg({ display: "expanded" }), terminalRows: 24 },
       80,
       theme,
     ).map(plain).length > 1,
   );
   check(
-    "expand=always also overrides idle collapse",
-    render(finishedState(), cfg({ expand: "always" }), 80).length > 1,
+    "display: expanded also overrides idle collapse",
+    render(finishedState(), cfg({ display: "expanded" }), 80).length > 1,
   );
   check(
-    "expand=never keeps the glyph even when ctrl+o is on",
-    renderPanel(
-      finishedState(),
-      {
-        config: cfg({ expand: "never" }),
-        expanded: true,
-        terminalRows: 24,
-      },
-      80,
-      theme,
-    ).map(plain).length === 1,
+    "display: compact still collapses to the glyph while idle",
+    render(finishedState(), cfg({ display: "compact" }), 80).length === 1 &&
+      render(finishedState(), cfg({ display: "minimal" }), 80).length === 1,
   );
   check(
     "idleMode=hidden also expands to the full panel",
     renderPanel(
       finishedState(),
       {
-        config: cfg({ expand: "follow", idleMode: "hidden" }),
-        expanded: true,
+        config: cfg({ display: "expanded", idleMode: "hidden" }),
         terminalRows: 24,
       },
       80,
@@ -2522,7 +2525,7 @@ for (const glyphs of ["unicode", "ascii"]) {
   check(
     "pane: enum rows are stored verbatim",
     applySettingValue("idleMode", "hidden", base).idleMode === "hidden" &&
-      applySettingValue("expand", "always", base).expand === "always",
+      applySettingValue("display", "expanded", base).display === "expanded",
   );
   check(
     "pane: an unknown id leaves the config alone",
@@ -2530,7 +2533,7 @@ for (const glyphs of ["unicode", "ascii"]) {
   );
   check(
     "pane: a value the config rejects leaves it alone",
-    applySettingValue("expand", "sometimes", base) === base,
+    applySettingValue("display", "sometimes", base) === base,
   );
 }
 
@@ -2648,7 +2651,7 @@ for (const glyphs of ["unicode", "ascii"]) {
     );
     check(
       "pane: PageUp/PageDown are not swallowed by the panel scroll",
-      key("\x1b[B") && cursor() === "expand",
+      key("\x1b[B") && cursor() === "display",
       cursor(),
     );
     check(
@@ -2664,17 +2667,17 @@ for (const glyphs of ["unicode", "ascii"]) {
     );
     check(
       "pane: selecting a row and pressing space cycles the value",
-      selectRow("expand") && key(" ") && valueOf("expand") === "always",
-      JSON.stringify({ cursor: cursor(), value: valueOf("expand") }),
+      selectRow("display") && key(" ") && valueOf("display") === "expanded",
+      JSON.stringify({ cursor: cursor(), value: valueOf("display") }),
     );
     check(
       "pane: the change is persisted immediately",
-      saved().expand === "always",
+      saved().display === "expanded",
       JSON.stringify(saved()),
     );
     check(
       "pane: enter cycles as well",
-      key("\r") && valueOf("expand") === "never" && saved().expand === "never",
+      key("\r") && valueOf("display") === "minimal" && saved().display === "minimal",
       JSON.stringify(saved()),
     );
     check(
