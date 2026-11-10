@@ -766,12 +766,6 @@ function italic(theme: ThemeLike, text: string): string {
   }
 }
 
-/** The rule above the prompt block, matching the panel and settings pane. */
-function promptRule(config: PanelConfig, width: number, theme: ThemeLike): string {
-  const rule = glyphsFor(config.glyphs).rule;
-  return paint(theme, "border", rule.repeat(Math.max(1, width)));
-}
-
 function pluralTools(count: number): string {
   if (!(count > 0)) return "";
   return `${count} tool${count === 1 ? "" : "s"}`;
@@ -1333,12 +1327,7 @@ export function renderPanel(
           state.promptExpanded === true,
         )
       : [];
-  // The rule belongs to the prompt block: one row of the budget, above the
-  // prompt, and never a click target.
-  const promptTop = promptRows.length > 0 ? 1 : 0;
-  const content: string[] = [];
-  if (promptTop > 0) content.push(promptRule(config, safeWidth, theme));
-  content.push(...promptRows);
+  const content: string[] = [...promptRows];
   const pastTurns = Array.isArray(state.pastTurns) ? state.pastTurns : [];
   // The mode sets the depth: `expanded` shows every retained turn, the other
   // modes keep their fold. Scrolling never changes that.
@@ -1407,15 +1396,17 @@ export function renderPanel(
     );
   }
 
-  // Prompt rows within the window: the rule above them and the scroll markers
-  // at the window's edges are not click targets.
-  let promptStart = Math.max(0, promptTop - start);
-  let promptEnd = Math.min(
+  // Prompt rows within the window, excluding the scroll markers.
+  const promptVisibleEnd = Math.min(
+    promptRows.length - start,
     windowRows.length,
-    promptTop + promptRows.length - start,
   );
-  if (start > 0) promptStart = Math.max(promptStart, 1);
-  if (below > 0) promptEnd = Math.min(promptEnd, windowRows.length - 1);
+  let promptStart = 0;
+  let promptEnd = Math.max(0, promptVisibleEnd);
+  if (start > 0 && promptEnd > 0) promptStart = 1;
+  if (below > 0 && promptEnd > promptStart) {
+    promptEnd = Math.min(promptEnd, windowRows.length - 1);
+  }
   if (promptEnd <= promptStart) {
     promptStart = 0;
     promptEnd = 0;

@@ -8,7 +8,6 @@ A [Pi](https://pi.dev) extension that puts two things directly above the prompt 
    Claude-Code style.
 
 ```
-─────────────────────────────────────────────────────────
 ❯ refactor the auth middleware to use the new token store
   ✓ turn 3 · 2 tools · 8.4s
   ✓ turn 4 · 1.1s
@@ -108,15 +107,13 @@ the value still applies for the session and you are warned once.
 
 ## Behaviour
 
-- **Prompt.** A full-width rule separates the pinned ask from the transcript above it, and the
-  text is italic — the `❯` stays accent — so it cannot be mistaken for another block of model
-  output. The rule follows `glyphs: "ascii"` and is charged to the row budget like any row.
-  Collapsed, the prompt is one row ellipsized at a word boundary, so the last visible word is
-  never chopped in half; only a single token longer than the row is cut where it has to be.
-  Clicking it — the `❯` or any text on the row, not the rule — expands the full text in place,
-  wrapped under the text column and opened at its first line, and clicking again collapses it. An
-  expanded prompt longer than the panel is not truncated: scroll it with the mouse wheel. A new
-  prompt always starts collapsed.
+- **Prompt.** The text is italic — the `❯` stays accent — so the pinned ask cannot be mistaken
+  for another block of model output. Collapsed, the prompt is one row ellipsized at a word
+  boundary, so the last visible word is never chopped in half; only a single token longer than
+  the row is cut where it has to be. Clicking it — the `❯` or any text on the row — expands the
+  full text in place, wrapped under the text column and opened at its first line, and clicking
+  again collapses it. An expanded prompt longer than the panel is not truncated: scroll it with
+  the mouse wheel. A new prompt always starts collapsed.
 - **Depth.** `display` picks how much of the run the tree keeps, and `/panel display` (or the
   settings pane) switches it while you work:
 
