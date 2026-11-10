@@ -73,7 +73,7 @@ malformed file produces one error notification and then defaults.
 | --- | --- | --- |
 | `enabled` | `true` | Master switch; off removes the widget and its timer. |
 | `maxRows` | `"auto"` | `"auto"` = 30% of the terminal height, clamped 6–18. A number is clamped 1–48. |
-| `pastTurns` | `2` | How many completed turns stay visible as one-line summaries while the panel is collapsed. Expanding reveals every turn the session still retains (up to 500). |
+| `pastTurns` | `2` | How many completed turns stay visible as one-line summaries while the panel is collapsed. Scrolling up over the panel unfolds them one at a time; expanding reveals every turn the session still retains (up to 500). |
 | `showPrompt` | `true` | Show the pinned prompt row. |
 | `showThinking` | `true` | Show the thinking row while a turn is live. |
 | `thinkingPreviewChars` | `60` | Width budget of the thinking preview. |
@@ -109,10 +109,11 @@ the value still applies for the session and you are warned once.
   it with the mouse wheel. A new prompt always starts collapsed.
 - **Depth.** The live tree is the current run. Each completed turn compresses to one line
   (`✓ turn 3 · 2 tools · 8.4s`), newest at the bottom. Collapsed, only the newest `pastTurns` are
-  shown; expanding the panel (`ctrl+o`, or `expand: "always"`) reveals every turn the session
-  still retains, so you can read the whole run's shape at once. Turns are retained as compact
-  records (number, tool count, duration) up to 500; turn numbers stay monotonic across prompts
-  and never gap.
+  shown; the rest are still one wheel notch away — scrolling up over the panel unfolds older
+  turns in place, and scrolling back down folds them away again. Expanding the panel (`ctrl+o`,
+  or `expand: "always"`) reveals every turn the session still retains at once, so you can read
+  the whole run's shape in one go. Turns are retained as compact records (number, tool count,
+  duration) up to 500; turn numbers stay monotonic across prompts and never gap.
 - **Thinking** is a single row that rewrites itself with the tail of the live buffer. It prefers
   the sentence currently in progress, snaps to a word boundary, and advances at most once per
   `thinkingMs` so it does not crawl per token. It disappears when the turn finishes.
@@ -125,14 +126,18 @@ the value still applies for the session and you are warned once.
   retained turn instead of the newest `pastTurns`. Expanded output is windowed to 48 lines or 60%
   of the terminal, whichever is larger, and scrolls inside the panel — the wheel over the panel
   moves it one to five rows at a time, and `… N earlier` / `… N more` markers show what is
-  off-screen. Wheel events fall through to the transcript whenever the panel fits on screen.
+  off-screen. The wheel acts on the panel for as long as the pointer is over it: it scrolls the
+  window when the content overflows, and otherwise unfolds retained turns (see **Depth**). It
+  falls through to the transcript only when the panel has nothing left to reveal or scroll, so a
+  short panel is not a dead zone.
 - **Budget.** The window shows the newest rows by default. Below 60 columns the duration column
   is dropped, below 48 the diffstat, below 40 the live turn collapses to one line.
 - **Lifecycle.** Hidden until your first prompt. Once a run settles, the panel collapses to one
   row of totals — `✓ 5 turns · 13 tools · 54s`, summed over every turn of that run, including
   turns `pastTurns` no longer keeps on screen — and expands back automatically as soon as the next
   run starts, before its first token. The collapsed row is not a dead end: `ctrl+o` (or
-  `expand: "always"`) brings the full finished tree back, so you can inspect an old run without
+  `expand: "always"`) brings the full finished tree back, and so does one wheel notch up over the
+  row — scroll back down and it folds to the totals again, so you can inspect an old run without
   starting a new one. `idleMode: "full"` always keeps the tree, and `"hidden"` removes it while
   idle (also expandable). Esc freezes the tree with the active rows marked interrupted (an
   interrupted panel stays expanded). A new prompt swaps the prompt line, archives the tree, and
@@ -166,10 +171,12 @@ it was verified against.
 
 ## Limitations
 
-- Mouse: the prompt block is clickable and the panel scrolls under the wheel. Other rows are
-  display-only; use `ctrl+o` to expand. Clicks and wheel events require Pi's fullscreen TUI
-  (`tuiMode: "fullscreen"`, the default) — regular mode leaves mouse reporting to the terminal,
-  so no mouse events reach extensions there.
+- Mouse: the prompt block is clickable and the panel takes the wheel while the pointer is over
+  it — scrolling a window that overflows, or unfolding retained turns that the collapsed depth
+  hides. Only when there is nothing left to reveal or scroll does the wheel continue to the
+  transcript. Other rows are display-only; use `ctrl+o` to expand. Clicks and wheel events require
+  Pi's fullscreen TUI (`tuiMode: "fullscreen"`, the default) — regular mode leaves mouse
+  reporting to the terminal, so no mouse events reach extensions there.
 - No jump-to-block: the Pi extension API has no transcript scroll hook, so a tree row cannot take
   you to the corresponding conversation block, and the panel cannot build one on its own — the
   transcript handle, and the entry-to-row map, are private. Turns are retained as compact records

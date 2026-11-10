@@ -1604,6 +1604,64 @@ for (const glyphs of ["unicode", "ascii"]) {
       turnRows(view(cfg({ expand: "follow", pastTurns: 0 }), true)).length === 7,
   );
 
+  // `peek` is the wheel's scrollback: extra retained turns above the collapsed
+  // fold, ignored while the panel is expanded (which shows them all anyway).
+  const peekView = (peek, config, stateOverrides = {}) =>
+    turnRows(
+      renderPanel(
+        { ...state, peek, ...stateOverrides },
+        { config, expanded: false, terminalRows: 100 },
+        100,
+        theme,
+      ).map(plain),
+    );
+  const peekConfig = cfg({ expand: "never", pastTurns: 2 });
+  check(
+    "peek: the collapsed fold hides the older retained turns",
+    peekView(0, peekConfig).length === 3 &&
+      !peekView(0, peekConfig).some((line) => line.includes("turn 1")),
+    JSON.stringify(peekView(0, peekConfig)),
+  );
+  check(
+    "peek: scrolling reveals the next older turns in order",
+    peekView(2, peekConfig).length === 5 &&
+      peekView(2, peekConfig).some((line) => line.includes("turn 3")) &&
+      !peekView(2, peekConfig).some((line) => line.includes("turn 2")),
+    JSON.stringify(peekView(2, peekConfig)),
+  );
+  check(
+    "peek: a peek past the retained turns clamps to all of them",
+    peekView(99, peekConfig).length === 7 &&
+      peekView(99, peekConfig).some((line) => line.includes("turn 1")),
+    JSON.stringify(peekView(99, peekConfig)),
+  );
+  check(
+    "peek: expanding ignores the peek instead of double counting it",
+    turnRows(
+      renderPanel(
+        { ...state, peek: 4 },
+        { config: cfg({ expand: "follow", pastTurns: 2 }), expanded: true, terminalRows: 100 },
+        100,
+        theme,
+      ).map(plain),
+    ).length === 7,
+  );
+  check(
+    "peek: an idle glyph row is a way back into the tree",
+    renderPanel(
+      { ...state, phase: "idle", peek: 0, currentTurn: { ...state.currentTurn, completed: true } },
+      { config: cfg({ idleMode: "glyph", pastTurns: 2 }), expanded: false, terminalRows: 100 },
+      100,
+      theme,
+    ).map(plain).length === 1 &&
+      renderPanel(
+        { ...state, phase: "idle", peek: 1, currentTurn: { ...state.currentTurn, completed: true } },
+        { config: cfg({ idleMode: "glyph", pastTurns: 2 }), expanded: false, terminalRows: 100 },
+        100,
+        theme,
+      ).map(plain).length > 1,
+  );
+
   const many = makeState({
     pastTurns: Array.from({ length: 20 }, (_, index) => ({
       number: index + 1,
@@ -1982,6 +2040,154 @@ for (const glyphs of ["unicode", "ascii"]) {
     check(
       "scroll: a new prompt resets the offset",
       rows().length === 1 && wheel(-1) === undefined,
+      JSON.stringify(rows()),
+    );
+
+    call("session_shutdown", { reason: "quit" });
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(tempAgent, { recursive: true, force: true });
+  }
+}
+
+// --- Wheel reveals history ----------------------------------------------------
+// A panel that fits has nothing to window, but it still hides retained turns
+// behind the collapsed depth. The wheel over the panel unfolds them in place
+// instead of scrolling the transcript, and folding code back down returns to
+// the compact view.
+
+{
+  const tempAgent = mkdtempSync(join(here, ".tmp-agent-peek-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = tempAgent;
+  writeFileSync(
+    join(tempAgent, "prompt-panel.json"),
+    JSON.stringify({
+      maxRows: 20,
+      pastTurns: 1,
+      expand: "never",
+      idleMode: "full",
+      animate: false,
+    }),
+  );
+  try {
+    const handlers = new Map();
+    let widget;
+    let command;
+    mod.default({
+      on(name, handler) {
+        handlers.set(name, handler);
+      },
+      registerCommand(name, options) {
+        if (name === "panel") command = options;
+      },
+    });
+    const ui = {
+      notify() {},
+      setWidget(_key, content) {
+        widget =
+          typeof content === "function"
+            ? content({ terminal: { rows: 40 }, requestRender() {} }, theme)
+            : undefined;
+      },
+      getToolsExpanded() {
+        return false;
+      },
+    };
+    const ctx = { mode: "tui", ui };
+    const call = (name, event = {}) => handlers.get(name)?.(event, ctx);
+    const rows = () => widget.render(80).map(plain);
+    const wheel = (delta) =>
+      widget.handleMouse({
+        type: "wheel",
+        button: "none",
+        wheelDelta: delta,
+        y: 0,
+      });
+    const turnRows = () =>
+      rows().filter((line) => /^\s+[✓✗●○] turn \d+/.test(line));
+    const turnNumbers = () =>
+      turnRows()
+        .map((line) => Number(/turn (\d+)/.exec(line)?.[1]))
+        .join(",");
+
+    call("session_start", { reason: "startup" });
+    call("input", { source: "interactive", text: "three turns" });
+    call("agent_start", {});
+    for (const number of [1, 2, 3]) {
+      call("turn_start", {});
+      call("tool_execution_start", {
+        toolCallId: `t${number}`,
+        toolName: "bash",
+        args: { command: `echo ${number}` },
+      });
+      call("tool_execution_end", {
+        toolCallId: `t${number}`,
+        toolName: "bash",
+        args: { command: `echo ${number}` },
+        result: "ok",
+      });
+      call("turn_end", {});
+    }
+    call("agent_settled", { aborted: false });
+
+    check(
+      "peek: a fitting panel shows only the collapsed depth",
+      turnNumbers() === "2,3",
+      turnNumbers(),
+    );
+    check(
+      "peek: the wheel unfolds an older turn instead of scrolling the transcript",
+      wheel(-1) !== undefined && turnNumbers() === "1,2,3",
+      JSON.stringify(rows()),
+    );
+    check(
+      "peek: with the history spent the wheel falls through again",
+      wheel(-1) === undefined && turnNumbers() === "1,2,3",
+      JSON.stringify(rows()),
+    );
+    check(
+      "peek: wheeling back down folds the revealed turns away",
+      wheel(1) !== undefined && turnNumbers() === "2,3",
+      JSON.stringify(rows()),
+    );
+    check(
+      "peek: the compact view still lets the transcript scroll",
+      wheel(1) === undefined,
+    );
+
+    await command.handler("idle glyph", ctx);
+    check(
+      "peek: an idle run collapses to the glyph row",
+      rows().length === 1 && /turns? ·/.test(rows()[0]),
+      JSON.stringify(rows()),
+    );
+    check(
+      "peek: wheeling up over the glyph brings the tree back",
+      wheel(-1) !== undefined &&
+        rows().length > 1 &&
+        rows().some((line) => line.includes("turn 1")),
+      JSON.stringify(rows()),
+    );
+    check(
+      "peek: wheeling down returns to the glyph",
+      wheel(1) !== undefined &&
+        rows().length === 1 &&
+        /turns? ·/.test(rows()[0]),
+      JSON.stringify(rows()),
+    );
+
+    wheel(-1);
+    check(
+      "peek: revealing survived into the next prompt reset",
+      turnNumbers() === "1,2,3",
+      turnNumbers(),
+    );
+    call("input", { source: "interactive", text: "a second ask" });
+    check(
+      "peek: a new prompt starts folded again",
+      turnNumbers() === "3" && !rows().some((line) => line.includes("turn 1")),
       JSON.stringify(rows()),
     );
 
