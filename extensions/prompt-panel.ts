@@ -167,11 +167,10 @@ export interface PanelState {
   /** Rows scrolled up from the bottom of the panel; 0 = pinned to the newest. */
   scroll?: number;
   /**
-   * Extra retained turns revealed above the mode's depth by scrolling up over
-   * the panel. Purely a viewport: 0 keeps the mode's fold, and
-   * `display: "expanded"` shows every turn regardless.
+   * True while the idle totals row has been clicked open, revealing the
+   * finished tree. The row stays at the bottom of the tree and folds it again.
    */
-  peek?: number;
+  summaryOpen?: boolean;
   pastTurns?: PastTurn[];
   currentTurn?: TurnRecord | null;
   /** Totals of the run in progress or just finished; authoritative when present. */
@@ -188,11 +187,12 @@ export interface PanelLayout {
   /** Window-relative row indices of the visible prompt block. */
   promptStart: number;
   promptEnd: number;
+  /** Window-relative row index of the clickable totals row, when shown. */
+  summaryStart: number;
+  summaryEnd: number;
   scrollOffset: number;
   maxScrollOffset: number;
   totalRows: number;
-  /** Whether this window was the expanded tree, so a host can match it. */
-  expanded: boolean;
 }
 
 export interface PanelRenderOptions {
@@ -200,7 +200,7 @@ export interface PanelRenderOptions {
   terminalRows?: number;
   /**
    * Reports the rendered window, so a host can map a click's local y onto the
-   * prompt block and clamp its own scroll offset.
+   * prompt block or the totals row, and clamp its own scroll offset.
    */
   onLayout?: (layout: PanelLayout) => void;
 }
@@ -821,8 +821,7 @@ function shownPastTurns(
 ): number {
   const retained = Array.isArray(state.pastTurns) ? state.pastTurns.length : 0;
   if (expanded) return retained;
-  const peek = Math.max(0, Math.floor(state.peek ?? 0));
-  return Math.min(retained, pastTurnsFor(config.display) + peek);
+  return Math.min(retained, pastTurnsFor(config.display));
 }
 
 function formatTurnHeader(
@@ -1215,16 +1214,23 @@ export function renderPanel(
   width: number,
   theme: ThemeLike,
 ): string[] {
-  const safeWidth = Math.max(0, Math.floor(width));
-  if (safeWidth === 0) {
+  // Layout reports are sparse: every field defaults to "nothing here".
+  const report = (patch: Partial<PanelLayout> = {}): void => {
     options?.onLayout?.({
       promptStart: 0,
       promptEnd: 0,
+      summaryStart: 0,
+      summaryEnd: 0,
       scrollOffset: 0,
       maxScrollOffset: 0,
       totalRows: 0,
-      expanded: false,
+      ...patch,
     });
+  };
+
+  const safeWidth = Math.max(0, Math.floor(width));
+  if (safeWidth === 0) {
+    report();
     return [];
   }
 
@@ -1240,28 +1246,28 @@ export function renderPanel(
   // Expanded content may grow past the collapsed budget, but it must never eat
   // most of the screen: cap it at 60% of the terminal, and at the hard ceiling.
   const expanded = config.display === "expanded";
-  // Rows scrolled up over the panel reveal more retained turns than the
-  // collapsed fold keeps. Expanded already shows them all, so it ignores this.
-  const peek = expanded ? 0 : Math.max(0, Math.floor(state.peek ?? 0));
 
-  // Idle collapse: one summary row instead of the finished tree, or nothing at
+  // Idle collapse: one totals row instead of the finished tree, or nothing at
   // all. Any active phase (primed/running/interrupted) renders the full panel,
-  // so a new run expands on its own without a keypress. Expanding the panel
-  // also reveals the finished tree, so the glyph is never a dead end — and
-  // neither is scrolling up over it.
-  if (config.idleMode !== "full" && !expanded && peek === 0 && isIdlePanel(state)) {
-    options?.onLayout?.({
-      promptStart: 0,
-      promptEnd: 0,
-      scrollOffset: 0,
-      maxScrollOffset: 0,
-      totalRows: 0,
-      expanded: false,
-    });
-    if (config.idleMode === "hidden") return [];
+  // so a new run expands on its own without a keypress. The totals row is also
+  // the way back in: clicking it opens the tree, and it then sits at the bottom
+  // of that tree to fold it again.
+  const idleSummary =
+    config.idleMode !== "full" && !expanded && isIdlePanel(state);
+  const summaryOpen =
+    idleSummary && config.idleMode !== "hidden" && state.summaryOpen === true;
+  if (idleSummary && !summaryOpen) {
+    if (config.idleMode === "hidden") {
+      report();
+      return [];
+    }
     const run = runTotals(state);
     // Nothing to summarize is the same as nothing to show.
-    if (run.turns <= 0) return [];
+    if (run.turns <= 0) {
+      report();
+      return [];
+    }
+    report({ summaryEnd: 1, totalRows: 1 });
     return [truncateToWidth(formatRunRow(run, config, theme), safeWidth, "", false)];
   }
 
@@ -1280,8 +1286,8 @@ export function renderPanel(
       : [];
   const content: string[] = [...promptBlock];
   const pastTurns = Array.isArray(state.pastTurns) ? state.pastTurns : [];
-  // The mode sets the depth: `expanded` shows every retained turn, and
-  // scrolling up over a panel that fits reveals them one fold at a time.
+  // The mode sets the depth: `expanded` shows every retained turn, the other
+  // modes keep their fold. Scrolling never changes that.
   const shownPast = shownPastTurns(state, config, expanded);
   const visiblePast = shownPast <= 0 ? [] : pastTurns.slice(-shownPast);
   for (const past of visiblePast) {
@@ -1309,6 +1315,14 @@ export function renderPanel(
 
   for (const queued of state.queued ?? []) {
     content.push(renderQueuedRow(queued, config, safeWidth, theme));
+  }
+
+  // Open from the totals row: keep it as the footer, so one more click folds
+  // the tree back to that single row.
+  let summaryRowTotal = -1;
+  if (summaryOpen) {
+    summaryRowTotal = content.length;
+    content.push(formatRunRow(runTotals(state), config, theme));
   }
 
   // Window the content instead of folding it away: scrolling up reveals the
@@ -1351,13 +1365,25 @@ export function renderPanel(
     promptStart = 0;
     promptEnd = 0;
   }
-  options?.onLayout?.({
+  // Same mapping for the totals footer: it is only clickable while it is
+  // actually in the window, which is when the tree is pinned to its end.
+  let summaryStart = 0;
+  let summaryEnd = 0;
+  if (summaryRowTotal >= 0) {
+    const summaryIndex = summaryRowTotal - start;
+    if (summaryIndex >= 0 && summaryIndex < windowRows.length) {
+      summaryStart = summaryIndex;
+      summaryEnd = summaryIndex + 1;
+    }
+  }
+  report({
     promptStart,
     promptEnd,
+    summaryStart,
+    summaryEnd,
     scrollOffset,
     maxScrollOffset,
     totalRows,
-    expanded,
   });
 
   return windowRows.map((line) => truncateToWidth(line, safeWidth, "", false));
@@ -1466,8 +1492,8 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
     phase: "hidden",
     prompt: "",
     promptExpanded: false,
+    summaryOpen: false,
     scroll: 0,
-    peek: 0,
     pastTurns: [],
     currentTurn: null,
     run: { turns: 0, tools: 0, durationMs: 0 },
@@ -1549,8 +1575,8 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
     state.phase = "hidden";
     state.prompt = "";
     state.promptExpanded = false;
+    state.summaryOpen = false;
     state.scroll = 0;
-    state.peek = 0;
     state.pastTurns = [];
     state.currentTurn = null;
     state.run = { turns: 0, tools: 0, durationMs: 0 };
@@ -1678,10 +1704,11 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
         let layout: PanelLayout = {
           promptStart: 0,
           promptEnd: 0,
+          summaryStart: 0,
+          summaryEnd: 0,
           scrollOffset: 0,
           maxScrollOffset: 0,
           totalRows: 0,
-          expanded: false,
         };
         return {
           render(width: number): string[] {
@@ -1703,65 +1730,39 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
           handleMouse(
             event: TuiMouseEvent,
           ): TuiMouseEventResult | undefined {
-            // The wheel always acts on the panel while the pointer is over it:
-            // it scrolls the window when the content overflows, and otherwise
-            // unfolds more of the run's retained history in place. Only when
-            // there is nothing left to reveal or scroll does it fall through to
-            // the transcript, so a short panel is not a dead zone.
+            // The wheel never leaves the panel while the pointer is over it. It
+            // scrolls the window when the content overflows and does nothing at
+            // the bounds, so the transcript underneath never moves.
             if (event.type === "wheel") {
               const step = Math.max(
                 1,
                 Math.min(5, Math.abs(event.wheelDelta ?? 1)),
               );
               const up = (event.wheelDelta ?? 0) < 0;
-              const retained = Array.isArray(state.pastTurns)
-                ? state.pastTurns.length
-                : 0;
-              const peek = Math.max(0, Math.floor(state.peek ?? 0));
-              const canReveal =
-                shownPastTurns(state, config, layout.expanded) < retained;
-
-              if (up) {
-                if (layout.scrollOffset < layout.maxScrollOffset) {
-                  state.scroll = Math.min(
-                    layout.maxScrollOffset,
-                    layout.scrollOffset + step,
-                  );
-                  return { handled: true };
-                }
-                if (canReveal) {
-                  state.peek = peek + step;
-                  // Open at the oldest row just revealed, not wherever the
-                  // window happened to be.
-                  state.scroll = Number.POSITIVE_INFINITY;
-                  return { handled: true };
-                }
-                return undefined;
+              const next = up
+                ? Math.min(layout.maxScrollOffset, layout.scrollOffset + step)
+                : Math.max(0, layout.scrollOffset - step);
+              if (next === layout.scrollOffset) {
+                return { handled: true, render: false };
               }
-
-              if (layout.scrollOffset > 0) {
-                state.scroll = Math.max(0, layout.scrollOffset - step);
-                return { handled: true };
-              }
-              if (peek > 0) {
-                state.peek = Math.max(0, peek - step);
-                state.scroll = 0;
-                return { handled: true };
-              }
-              // Pinned at the tail of a window that still has rows above: keep
-              // the wheel on the panel instead of moving the transcript under
-              // the pointer.
-              if (layout.maxScrollOffset > 0) return { handled: true };
-              return undefined;
+              state.scroll = next;
+              return { handled: true };
             }
             if (event.button !== "left") return undefined;
-            if (event.y < layout.promptStart || event.y >= layout.promptEnd) {
-              return undefined;
-            }
+            const onPrompt =
+              event.y >= layout.promptStart && event.y < layout.promptEnd;
+            const onSummary =
+              event.y >= layout.summaryStart && event.y < layout.summaryEnd;
+            if (!onPrompt && !onSummary) return undefined;
             // Handle the press so the renderer addresses the click to this
             // component instead of starting a transcript selection.
             if (event.type === "press") return { handled: true, render: false };
             if (event.type !== "click") return undefined;
+            if (onSummary) {
+              state.summaryOpen = state.summaryOpen !== true;
+              state.scroll = 0;
+              return { handled: true };
+            }
             const expanding = state.promptExpanded !== true;
             state.promptExpanded = expanding;
             // Open at the prompt's first line, not wherever the view was.
@@ -1950,7 +1951,7 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
     state.prompt = String(event.text ?? "");
     // A new ask starts collapsed and pinned to its own content.
     state.promptExpanded = false;
-    state.peek = 0;
+    state.summaryOpen = false;
     state.scroll = 0;
     state.now = Date.now();
     finalizeTurn(state.currentTurn);
@@ -2053,6 +2054,9 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
     // Covers the last turn of the run, including an aborted one that never saw
     // `turn_end`.
     finalizeTurn(turn);
+    // A tree opened from the totals row is a look at this run, not a mode:
+    // collapse again once the next run settles.
+    state.summaryOpen = false;
     scheduleRender();
   });
 

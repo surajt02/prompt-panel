@@ -1615,62 +1615,75 @@ for (const glyphs of ["unicode", "ascii"]) {
     JSON.stringify(minimalTurns),
   );
 
-  // `peek` is the wheel's scrollback: extra retained turns above the collapsed
-  // fold, ignored while the panel is expanded (which shows them all anyway).
-  const peekView = (peek, config, stateOverrides = {}) =>
-    turnRows(
-      renderPanel(
-        { ...state, peek, ...stateOverrides },
-        { config, terminalRows: 100 },
-        100,
-        theme,
-      ).map(plain),
-    );
-  const peekConfig = cfg({ display: "compact" });
-  check(
-    "peek: the collapsed fold hides the older retained turns",
-    peekView(0, peekConfig).length === 3 &&
-      !peekView(0, peekConfig).some((line) => line.includes("turn 1")),
-    JSON.stringify(peekView(0, peekConfig)),
-  );
-  check(
-    "peek: scrolling reveals the next older turns in order",
-    peekView(2, peekConfig).length === 5 &&
-      peekView(2, peekConfig).some((line) => line.includes("turn 3")) &&
-      !peekView(2, peekConfig).some((line) => line.includes("turn 2")),
-    JSON.stringify(peekView(2, peekConfig)),
-  );
-  check(
-    "peek: a peek past the retained turns clamps to all of them",
-    peekView(99, peekConfig).length === 7 &&
-      peekView(99, peekConfig).some((line) => line.includes("turn 1")),
-    JSON.stringify(peekView(99, peekConfig)),
-  );
-  check(
-    "peek: expanding ignores the peek instead of double counting it",
-    turnRows(
-      renderPanel(
-        { ...state, peek: 4 },
-        { config: cfg({ display: "expanded" }), terminalRows: 100 },
-        100,
-        theme,
-      ).map(plain),
-    ).length === 7,
-  );
-  check(
-    "peek: an idle glyph row is a way back into the tree",
+  // Scrolling is a viewport, never a mode: the same state at different offsets
+  // renders the same number of rows, and never reveals turns the mode drops.
+  const scrolledView = (scroll) =>
     renderPanel(
-      { ...state, phase: "idle", peek: 0, currentTurn: { ...state.currentTurn, completed: true } },
-      { config: cfg({ idleMode: "glyph" }), terminalRows: 100 },
+      { ...state, scroll },
+      { config: cfg({ display: "compact", maxRows: 2 }), terminalRows: 24 },
       100,
       theme,
-    ).map(plain).length === 1 &&
-      renderPanel(
-        { ...state, phase: "idle", peek: 1, currentTurn: { ...state.currentTurn, completed: true } },
-        { config: cfg({ idleMode: "glyph" }), terminalRows: 100 },
+    ).map(plain);
+  check(
+    "scroll: moving the window never changes the panel's row count",
+    scrolledView(0).length === 2 &&
+      scrolledView(1).length === 2 &&
+      scrolledView(2).length === 2,
+    JSON.stringify({ top: scrolledView(2), middle: scrolledView(1), tail: scrolledView(0) }),
+  );
+  check(
+    "scroll: moving the window swaps rows but reveals no dropped turn",
+    scrolledView(0).some((line) => line.includes("turn 7")) &&
+      scrolledView(2).some((line) => line.includes("refactor the auth")) &&
+      [0, 1, 2].every(
+        (scroll) => !scrolledView(scroll).some((line) => line.includes("turn 1")),
+      ),
+    JSON.stringify({ top: scrolledView(2), tail: scrolledView(0) }),
+  );
+  check(
+    "scroll: an idle totals row is a click target, not a scroll target",
+    (() => {
+      const idleState = {
+        ...state,
+        phase: "idle",
+        currentTurn: { ...state.currentTurn, completed: true },
+      };
+      let glyphLayout;
+      const glyph = renderPanel(
+        idleState,
+        {
+          config: cfg({ idleMode: "glyph" }),
+          terminalRows: 100,
+          onLayout: (layout) => {
+            glyphLayout = layout;
+          },
+        },
         100,
         theme,
-      ).map(plain).length > 1,
+      ).map(plain);
+      let openLayout;
+      const open = renderPanel(
+        { ...idleState, summaryOpen: true },
+        {
+          config: cfg({ idleMode: "glyph" }),
+          terminalRows: 100,
+          onLayout: (layout) => {
+            openLayout = layout;
+          },
+        },
+        100,
+        theme,
+      ).map(plain);
+      return (
+        glyph.length === 1 &&
+        glyphLayout.summaryStart === 0 &&
+        glyphLayout.summaryEnd === 1 &&
+        open.length > 1 &&
+        open[open.length - 1].includes("turns") &&
+        openLayout.summaryStart === open.length - 1 &&
+        openLayout.summaryEnd === open.length
+      );
+    })(),
   );
 
   const many = makeState({
@@ -2003,8 +2016,8 @@ for (const glyphs of ["unicode", "ascii"]) {
     call("session_start", { reason: "startup" });
     call("input", { source: "interactive", text: longPrompt });
     check(
-      "scroll: the wheel falls through while the panel fits",
-      wheel(-1) === undefined && rows().length === 1,
+      "scroll: the wheel stays on a panel that fits instead of scrolling the transcript",
+      wheel(-1) !== undefined && wheel(1) !== undefined && rows().length === 1,
     );
 
     click(0);
@@ -2046,7 +2059,7 @@ for (const glyphs of ["unicode", "ascii"]) {
     call("input", { source: "interactive", text: longPrompt });
     check(
       "scroll: a new prompt resets the offset",
-      rows().length === 1 && wheel(-1) === undefined,
+      rows().length === 1 && wheel(-1) !== undefined,
       JSON.stringify(rows()),
     );
 
@@ -2065,7 +2078,7 @@ for (const glyphs of ["unicode", "ascii"]) {
 // the compact view.
 
 {
-  const tempAgent = mkdtempSync(join(here, ".tmp-agent-peek-"));
+  const tempAgent = mkdtempSync(join(here, ".tmp-agent-wheel-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = tempAgent;
   writeFileSync(
@@ -2138,69 +2151,73 @@ for (const glyphs of ["unicode", "ascii"]) {
     }
     call("agent_settled", { aborted: false });
 
+    const click = (y) => {
+      widget.handleMouse({ type: "press", button: "left", y });
+      return widget.handleMouse({ type: "click", button: "left", y });
+    };
+
     check(
-      "peek: minimal shows only the live turn",
+      "scroll: minimal shows only the live turn",
       turnNumbers() === "3",
       turnNumbers(),
     );
     check(
-      "peek: the wheel unfolds the newest past turn instead of scrolling the transcript",
-      wheel(-1) !== undefined && turnNumbers() === "2,3",
-      JSON.stringify(rows()),
-    );
-    check(
-      "peek: wheeling up again reaches the oldest retained turn",
-      wheel(-1) !== undefined && turnNumbers() === "1,2,3",
-      JSON.stringify(rows()),
-    );
-    check(
-      "peek: with the history spent the wheel falls through again",
-      wheel(-1) === undefined && turnNumbers() === "1,2,3",
-      JSON.stringify(rows()),
-    );
-    check(
-      "peek: wheeling back down folds the revealed turns away one at a time",
-      wheel(1) !== undefined &&
-        turnNumbers() === "2,3" &&
+      "scroll: the wheel stays on a panel that fits, in both directions",
+      wheel(-1) !== undefined &&
         wheel(1) !== undefined &&
         turnNumbers() === "3",
       JSON.stringify(rows()),
     );
-    check(
-      "peek: the folded view still lets the transcript scroll",
-      wheel(1) === undefined,
-    );
 
     await command.handler("idle glyph", ctx);
     check(
-      "peek: an idle run collapses to the glyph row",
+      "scroll: an idle run collapses to the totals row",
       rows().length === 1 && /turns? ·/.test(rows()[0]),
       JSON.stringify(rows()),
     );
     check(
-      "peek: wheeling up over the glyph brings the tree back",
-      wheel(-1) !== undefined &&
-        rows().length > 1 &&
-        rows().some((line) => line.includes("turn 2")),
+      "scroll: the wheel over the totals row neither opens it nor moves the transcript",
+      wheel(-1) !== undefined && rows().length === 1,
       JSON.stringify(rows()),
     );
     check(
-      "peek: wheeling down returns to the glyph",
-      wheel(1) !== undefined &&
+      "click: the totals row opens the tree the mode would render",
+      click(0) !== undefined &&
+        rows().length > 1 &&
+        rows().some((line) => line.includes("turn 3")) &&
+        rows().some((line) => line.includes("three turns")),
+      JSON.stringify(rows()),
+    );
+    const openRows = rows().length;
+    check(
+      "click: the totals footer closes it again",
+      /turns? ·/.test(rows()[openRows - 1]) &&
+        click(openRows - 1) !== undefined &&
         rows().length === 1 &&
         /turns? ·/.test(rows()[0]),
+      JSON.stringify({ openRows, closed: rows() }),
+    );
+
+    click(0);
+    check(
+      "click: an open tree survives a scroll",
+      wheel(-1) !== undefined && rows().length > 1,
       JSON.stringify(rows()),
     );
 
-    wheel(-1);
+    call("agent_start", {});
+    call("turn_start", {});
+    call("turn_end", {});
+    call("agent_settled", { aborted: false });
     check(
-      "peek: revealing survived into the next prompt reset",
-      turnNumbers() === "2,3",
-      turnNumbers(),
+      "click: the next settle folds an opened tree back to the totals row",
+      rows().length === 1 && /turns? ·/.test(rows()[0]),
+      JSON.stringify(rows()),
     );
+
     call("input", { source: "interactive", text: "a second ask" });
     check(
-      "peek: a new prompt starts folded, with no history above the live turn",
+      "click: a new prompt starts folded, with no history above the live turn",
       turnNumbers() === "" &&
         rows().length === 1 &&
         rows()[0].includes("a second ask"),

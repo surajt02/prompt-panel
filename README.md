@@ -72,7 +72,7 @@ malformed file produces one error notification and then defaults.
 | --- | --- | --- |
 | `enabled` | `true` | Master switch; off removes the widget and its timer. |
 | `maxRows` | `"auto"` | `"auto"` = 30% of the terminal height, clamped 6–18. A number is clamped 1–48. |
-| `display` | `"compact"` | How much of the run to show: `"minimal"` = the prompt and the live turn; `"compact"` = the live turn plus the previous two, one line per tool; `"expanded"` = every retained turn (up to 500), with tool arguments and result previews. Scrolling up over the panel unfolds older retained turns in either of the first two modes. |
+| `display` | `"compact"` | How much of the run to show: `"minimal"` = the prompt and the live turn; `"compact"` = the live turn plus the previous two, one line per tool; `"expanded"` = every retained turn (up to 500), with tool arguments and result previews. |
 | `showPrompt` | `true` | Show the pinned prompt row. |
 | `showThinking` | `true` | Show the thinking row while a turn is live. |
 | `thinkingPreviewChars` | `60` | Width budget of the thinking preview. |
@@ -121,10 +121,11 @@ the value still applies for the session and you are warned once.
   | `expanded` | every turn the session still retains, with tool arguments and results |
 
   Each completed turn compresses to one line (`✓ turn 3 · 2 tools · 8.4s`), newest at the bottom;
-  the live turn keeps its thinking row and tool rows in every mode. The mode's past turns are a
-  floor, not a ceiling: scrolling up over the panel unfolds older retained turns in place, and
-  scrolling back down folds them away again. Turns are retained as compact records (number, tool
-  count, duration) up to 500; turn numbers stay monotonic across prompts and never gap.
+  the live turn keeps its thinking row and tool rows in every mode. The mode alone decides the
+  depth: scrolling moves the window inside it and never adds a turn, so the panel's height only
+  changes when the mode, budget, or run state changes. Turns are retained as compact records
+  (number, tool count, duration) up to 500; turn numbers stay monotonic across prompts and never
+  gap.
 - **Thinking** is a single row that rewrites itself with the tail of the live buffer. It prefers
   the sentence currently in progress, snaps to a word boundary, and advances at most once per
   `thinkingMs` so it does not crawl per token. It disappears when the turn finishes.
@@ -138,20 +139,19 @@ the value still applies for the session and you are warned once.
   the transcript, but it no longer changes the panel — the mode is the only switch. Expanded
   output is windowed to 48 lines or 60% of the terminal, whichever is larger, and scrolls inside
   the panel — the wheel over the panel moves it one to five rows at a time, and `… N earlier` /
-  `… N more` markers show what is off-screen. The wheel acts on the panel for as long as the
-  pointer is over it: it scrolls the window when the content overflows, and otherwise unfolds
-  retained turns (see **Depth**). It falls through to the transcript only when the panel has
-  nothing left to reveal or scroll, so a short panel is not a dead zone.
+  `… N more` markers show what is off-screen. The wheel never leaves the panel while the pointer
+  is over it: it stops at the ends instead of scrolling the transcript underneath, so pointing at
+  the tree can never move the conversation. Scroll the transcript from outside the panel.
 - **Budget.** The window shows the newest rows by default. Below 60 columns the duration column
   is dropped, below 48 the diffstat, below 40 the live turn collapses to one line.
 - **Lifecycle.** Hidden until your first prompt. Once a run settles, the panel collapses to one
   row of totals — `✓ 5 turns · 13 tools · 54s`, summed over every turn of that run, including
   turns the mode no longer keeps on screen — and expands back automatically as soon as the next
-  run starts, before its first token. The collapsed row is not a dead end: `/panel display
-  expanded` brings the full finished tree back, and so does one wheel notch up over the row —
-  scroll back down and it folds to the totals again, so you can inspect an old run without
-  starting a new one. `idleMode: "full"` always keeps the tree and `"hidden"` removes it while
-  idle (also expandable), though `display: "expanded"` keeps the tree either way. Esc freezes the
+  run starts, before its first token. The collapsed row is not a dead end: clicking it opens the
+  tree the mode would render, with the totals row repeated at the bottom as the control that
+  folds it again — so you can inspect a finished run without changing the mode. A new prompt, or
+  the next run settling, folds it back. `idleMode: "full"` always keeps the tree and `"hidden"`
+  removes the row entirely, though `display: "expanded"` keeps the tree either way. Esc freezes the
   tree with the active rows marked interrupted (an interrupted panel stays expanded). A new
   prompt swaps the prompt line, archives the tree, and clears the live turn. `/new`, `/resume`,
   `/tree`, and `/reload` reset it; resuming a session replays nothing.
@@ -183,13 +183,13 @@ it was verified against.
 
 ## Limitations
 
-- Mouse: the prompt block is clickable and the panel takes the wheel while the pointer is over
-  it — scrolling a window that overflows, or unfolding retained turns that the collapsed depth
-  hides. Only when there is nothing left to reveal or scroll does the wheel continue to the
-  transcript. Other rows are display-only; use `/panel display expanded` for tool arguments and
-  results. Clicks and wheel events require
-  Pi's fullscreen TUI (`tuiMode: "fullscreen"`, the default) — regular mode leaves mouse
-  reporting to the terminal, so no mouse events reach extensions there.
+- Mouse: the prompt block and the idle totals row are clickable, and the panel owns the wheel
+  while the pointer is over it — it scrolls its own window when the content overflows and does
+  nothing at the ends. It never scrolls the transcript, which also means a panel short enough to
+  fit is a no-op for the wheel rather than a pass-through. Other rows are display-only; use
+  `/panel display expanded` for tool arguments and results. Clicks and wheel events require Pi's
+  fullscreen TUI (`tuiMode: "fullscreen"`, the default) — regular mode leaves mouse reporting to
+  the terminal, so no mouse events reach extensions there.
 - No jump-to-block: the Pi extension API has no transcript scroll hook, so a tree row cannot take
   you to the corresponding conversation block, and the panel cannot build one on its own — the
   transcript handle, and the entry-to-row map, are private. Turns are retained as compact records
