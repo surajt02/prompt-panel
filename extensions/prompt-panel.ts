@@ -12,6 +12,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import type { TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const WIDGET_KEY = "prompt-panel";
@@ -127,6 +128,8 @@ export interface RunRecord {
 export interface PanelState {
   phase?: "hidden" | "primed" | "running" | "idle" | "interrupted";
   prompt?: string;
+  /** True while the prompt block is expanded in place (clicked open). */
+  promptExpanded?: boolean;
   pastTurns?: PastTurn[];
   currentTurn?: TurnRecord | null;
   /** Totals of the run in progress or just finished; authoritative when present. */
@@ -142,6 +145,11 @@ export interface PanelRenderOptions {
   config?: Partial<PanelConfig>;
   expanded?: boolean;
   terminalRows?: number;
+  /**
+   * Receives the number of rows the prompt block occupied, so a host can map a
+   * click's local y coordinate onto it.
+   */
+  onPromptRows?: (rows: number) => void;
 }
 
 interface ThemeLike {
@@ -930,22 +938,68 @@ function renderQueuedRow(
   return paint(theme, "dim", `${prefix}${body}${suffix}`);
 }
 
-function renderPromptRow(
+/**
+ * The prompt block. Collapsed it is one ellipsized row; expanded it wraps the
+ * full text in place, with continuation lines aligned under the text column.
+ */
+function renderPromptRows(
   prompt: string,
   config: PanelConfig,
   width: number,
   theme: ThemeLike,
-): string {
+  expanded: boolean,
+  maxLines: number,
+): string[] {
   const glyphs = glyphsFor(config.glyphs);
   const prefix = `${glyphs.prompt} `;
-  const available = Math.max(0, width - visibleWidth(prefix));
-  const text = truncateToWidth(
-    collapseWhitespace(prompt),
-    available,
-    glyphs.ellipsis,
-    false,
-  );
-  return paint(theme, "accent", prefix) + paint(theme, "text", text);
+  const prefixWidth = visibleWidth(prefix);
+  const indent = " ".repeat(prefixWidth);
+  const available = Math.max(1, width - prefixWidth);
+  const raw = String(prompt ?? "").replace(/\r\n?/g, "\n");
+
+  if (!expanded) {
+    const text = truncateToWidth(
+      collapseWhitespace(raw),
+      available,
+      glyphs.ellipsis,
+      false,
+    );
+    return [paint(theme, "accent", prefix) + paint(theme, "text", text)];
+  }
+
+  // Keep paragraph breaks: a prompt is often a short ask followed by detail.
+  const wrapped: string[] = [];
+  for (const paragraph of raw.split("\n")) {
+    const line = collapseWhitespace(paragraph);
+    if (line === "") {
+      if (wrapped.length > 0 && wrapped[wrapped.length - 1] !== "") {
+        wrapped.push("");
+      }
+      continue;
+    }
+    wrapped.push(...wrapTextWithAnsi(line, available));
+  }
+  while (wrapped.length > 0 && wrapped[wrapped.length - 1] === "") wrapped.pop();
+
+  const limit = Math.max(1, Math.floor(maxLines));
+  let marker = -1;
+  if (wrapped.length > limit) {
+    const hidden = wrapped.length - (limit - 1);
+    wrapped.length = limit - 1;
+    marker = wrapped.length;
+    wrapped.push(
+      `${glyphs.ellipsis} ${hidden} more line${hidden === 1 ? "" : "s"}`,
+    );
+  }
+
+  return wrapped.map((text, index) => {
+    if (text === "") return "";
+    if (index === marker) {
+      return paint(theme, "dim", `${indent}${text}`);
+    }
+    const lead = index === 0 ? paint(theme, "accent", prefix) : indent;
+    return lead + paint(theme, "text", text);
+  });
 }
 
 /**
@@ -959,7 +1013,10 @@ export function renderPanel(
   theme: ThemeLike,
 ): string[] {
   const safeWidth = Math.max(0, Math.floor(width));
-  if (safeWidth === 0) return [];
+  if (safeWidth === 0) {
+    options?.onPromptRows?.(0);
+    return [];
+  }
 
   const config: PanelConfig = { ...DEFAULT_CONFIG, ...(options?.config ?? {}) };
   const glyphs = glyphsFor(config.glyphs);
@@ -984,6 +1041,7 @@ export function renderPanel(
   // so a new run expands on its own without a keypress. Expanding the panel
   // also reveals the finished tree, so the glyph is never a dead end.
   if (config.idleMode !== "full" && !expanded && isIdlePanel(state)) {
+    options?.onPromptRows?.(0);
     if (config.idleMode === "hidden") return [];
     const run = runTotals(state);
     // Nothing to summarize is the same as nothing to show.
@@ -994,10 +1052,21 @@ export function renderPanel(
   const expandRoom = Math.max(budget, Math.floor(terminalRows * 0.6));
   const cap = expanded ? Math.min(HARD_MAX_ROWS, expandRoom) : budget;
 
-  const lines: string[] = [];
-  if (config.showPrompt && state.prompt) {
-    lines.push(renderPromptRow(state.prompt, config, safeWidth, theme));
-  }
+  const promptBlock =
+    config.showPrompt && state.prompt
+      ? renderPromptRows(
+          state.prompt,
+          config,
+          safeWidth,
+          theme,
+          state.promptExpanded === true,
+          // Keep one row for the body: expanding a huge prompt must not swallow
+          // the whole panel.
+          Math.max(1, Math.min(HARD_MAX_ROWS - 1, cap - 1)),
+        )
+      : [];
+  options?.onPromptRows?.(promptBlock.length);
+  const lines: string[] = [...promptBlock];
 
   const body: string[] = [];
   const pastTurns = Array.isArray(state.pastTurns) ? state.pastTurns : [];
@@ -1156,6 +1225,7 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
   const state: PanelState = {
     phase: "hidden",
     prompt: "",
+    promptExpanded: false,
     pastTurns: [],
     currentTurn: null,
     run: { turns: 0, tools: 0, durationMs: 0 },
@@ -1225,6 +1295,7 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
   function resetState(): void {
     state.phase = "hidden";
     state.prompt = "";
+    state.promptExpanded = false;
     state.pastTurns = [];
     state.currentTurn = null;
     state.run = { turns: 0, tools: 0, durationMs: 0 };
@@ -1348,6 +1419,9 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
         const token = {};
         componentToken = token;
         requestRender = () => tui.requestRender();
+        // Rows the prompt block occupied in the last render; the only region
+        // that reacts to clicks.
+        let promptRows = 0;
         return {
           render(width: number): string[] {
             return renderPanel(
@@ -1356,10 +1430,25 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
                 config,
                 expanded: ctx.ui.getToolsExpanded(),
                 terminalRows: tui.terminal?.rows ?? process.stdout.rows ?? 24,
+                onPromptRows: (rows) => {
+                  promptRows = rows;
+                },
               },
               width,
               theme,
             );
+          },
+          handleMouse(
+            event: TuiMouseEvent,
+          ): TuiMouseEventResult | undefined {
+            if (event.button !== "left") return undefined;
+            if (event.y < 0 || event.y >= promptRows) return undefined;
+            // Handle the press so the renderer addresses the click to this
+            // component instead of starting a transcript selection.
+            if (event.type === "press") return { handled: true, render: false };
+            if (event.type !== "click") return undefined;
+            state.promptExpanded = state.promptExpanded !== true;
+            return { handled: true };
           },
           invalidate(): void {
             // Rendering derives everything from live state.
@@ -1439,6 +1528,8 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
 
     promptSeen = true;
     state.prompt = String(event.text ?? "");
+    // A new ask starts collapsed, even if the previous one was clicked open.
+    state.promptExpanded = false;
     state.now = Date.now();
     finalizeTurn(state.currentTurn);
     archiveCurrentTurn();

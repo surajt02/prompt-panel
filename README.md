@@ -103,6 +103,10 @@ the value still applies for the session and you are warned once.
 
 ## Behaviour
 
+- **Prompt.** The pinned prompt is one ellipsized row. Clicking it — the `❯` or any text on the
+  row — expands the full text in place, wrapped under the text column, and clicking again
+  collapses it. Expansion is capped by the panel budget and ends with `… N more lines` when the
+  prompt is longer than that. A new prompt always starts collapsed.
 - **Depth.** The live tree is the current run. Each completed turn compresses to one line
   (`✓ turn 3 · 2 tools · 8.4s`), newest at the bottom. Collapsed, only the newest `pastTurns` are
   shown; expanding the panel (`ctrl+o`, or `expand: "always"`) reveals every turn the session
@@ -158,7 +162,9 @@ cannot detect a layout bug.
 
 ## Limitations
 
-- No mouse support: rows are display-only. Use `ctrl+o` to expand.
+- Mouse: only the prompt block is clickable. Other rows are display-only; use `ctrl+o` to expand.
+  Clicks require Pi's fullscreen TUI (`tuiMode: "fullscreen"`, the default) — regular mode leaves
+  mouse reporting to the terminal, so no click events reach extensions there.
 - No jump-to-block: the Pi extension API has no transcript scroll hook, so a tree row cannot take
   you to the corresponding conversation block. Each turn is still retained as its own record so a
   future navigation hook can target it.

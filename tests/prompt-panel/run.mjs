@@ -1633,6 +1633,215 @@ for (const glyphs of ["unicode", "ascii"]) {
   );
 }
 
+// --- Prompt expansion ---------------------------------------------------------
+// Clicking the prompt block expands the full text in place; the renderer is
+// pure, so `promptExpanded` is plain state.
+
+{
+  const longPrompt =
+    "refactor the auth middleware to use the new token store, keep the old " +
+    "session cookie path working for one release, and add a migration note " +
+    "to the changelog";
+  const base = makeState({
+    prompt: longPrompt,
+    currentTurn: null,
+    pastTurns: [],
+    queued: [],
+    notices: [],
+  });
+
+  const collapsed = render(base, cfg({ pastTurns: 0 }), 60).map(plain);
+  check(
+    "prompt: collapsed shows one ellipsized row",
+    collapsed.length === 1 &&
+      collapsed[0].startsWith("❯ ") &&
+      collapsed[0].endsWith("…"),
+    JSON.stringify(collapsed),
+  );
+
+  let promptRows = -1;
+  const expandedLines = renderPanel(
+    { ...base, promptExpanded: true },
+    {
+      config: cfg({ pastTurns: 0 }),
+      expanded: false,
+      terminalRows: 40,
+      onPromptRows: (rows) => {
+        promptRows = rows;
+      },
+    },
+    60,
+    theme,
+  );
+  const expanded = expandedLines.map(plain);
+  check(
+    "prompt: expanded wraps the full text in place",
+    expanded.length > 1 &&
+      expanded[0].startsWith("❯ ") &&
+      expanded.every((line, index) => index === 0 || line.startsWith("  ")) &&
+      expanded.join(" ").replace(/\s+/g, " ").includes("add a migration note"),
+    JSON.stringify(expanded),
+  );
+  check(
+    "prompt: expanded rows stay inside the width",
+    expandedLines.every((line) => visibleWidth(line) <= 60),
+  );
+  check(
+    "prompt: onPromptRows reports the expanded row count",
+    promptRows === expanded.length,
+    `rows=${promptRows} lines=${expanded.length}`,
+  );
+
+  const multiParagraph = renderPanel(
+    { ...base, prompt: "first ask\n\nsecond paragraph with detail", promptExpanded: true },
+    { config: cfg({ pastTurns: 0 }), expanded: false, terminalRows: 40 },
+    60,
+    theme,
+  ).map(plain);
+  check(
+    "prompt: expanded keeps paragraph breaks",
+    multiParagraph.some((line) => line.trim() === "") &&
+      multiParagraph.some((line) => line.includes("second paragraph")),
+    JSON.stringify(multiParagraph),
+  );
+
+  const capped = renderPanel(
+    {
+      ...base,
+      prompt: "word ".repeat(200),
+      promptExpanded: true,
+      pastTurns: [],
+      currentTurn: null,
+    },
+    { config: cfg({ pastTurns: 0, maxRows: 5 }), expanded: false, terminalRows: 24 },
+    40,
+    theme,
+  ).map(plain);
+  check(
+    "prompt: a huge prompt is capped and admits how much is hidden",
+    capped.length <= 5 && capped.some((line) => /… \d+ more lines/.test(line)),
+    JSON.stringify(capped),
+  );
+
+  check(
+    "prompt: a new prompt renders collapsed by default",
+    render(base, cfg({ pastTurns: 0 }), 60).length === 1,
+  );
+
+  let idlePromptRows = -1;
+  renderPanel(
+    { ...base, phase: "idle", currentTurn: null, run: null, promptExpanded: true },
+    {
+      config: cfg({ pastTurns: 0 }),
+      expanded: false,
+      terminalRows: 40,
+      onPromptRows: (rows) => {
+        idlePromptRows = rows;
+      },
+    },
+    60,
+    theme,
+  );
+  check(
+    "prompt: a collapsed idle glyph reports no prompt rows to click",
+    idlePromptRows === 0,
+    `rows=${idlePromptRows}`,
+  );
+}
+
+// --- Prompt click -------------------------------------------------------------
+
+{
+  const tempAgent = mkdtempSync(join(here, ".tmp-agent-click-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = tempAgent;
+  try {
+    const longPrompt =
+      "refactor the auth middleware to use the new token store, keep the old " +
+      "session cookie path working for one release, and add a migration note " +
+      "to the changelog";
+    const handlers = new Map();
+    let widget;
+    mod.default({
+      on(name, handler) {
+        handlers.set(name, handler);
+      },
+      registerCommand() {},
+    });
+    const ui = {
+      notify() {},
+      setWidget(_key, content) {
+        widget =
+          typeof content === "function"
+            ? content({ terminal: { rows: 30 }, requestRender() {} }, theme)
+            : undefined;
+      },
+      getToolsExpanded() {
+        return false;
+      },
+    };
+    const ctx = { mode: "tui", ui };
+    const call = (name, event) => handlers.get(name)?.(event, ctx);
+    const rows = () => widget.render(60).map(plain);
+    const click = (y, button = "left") => {
+      widget.handleMouse({ type: "press", button, y });
+      return widget.handleMouse({ type: "click", button, y });
+    };
+
+    call("session_start", { reason: "startup" });
+    call("input", { source: "interactive", text: longPrompt });
+    check(
+      "click: before any click the prompt is one truncated row",
+      rows().length === 1 && rows()[0].endsWith("…"),
+      JSON.stringify(rows()),
+    );
+
+    check(
+      "click: a right-click on the prompt does nothing",
+      click(0, "right") === undefined && rows().length === 1,
+    );
+    check(
+      "click: a click below the prompt row does nothing",
+      click(1) === undefined && rows().length === 1,
+    );
+
+    check(
+      "click: a click on the prompt expands it in place",
+      click(0) !== undefined &&
+        rows().length > 1 &&
+        rows().join(" ").includes("add a migration note"),
+      JSON.stringify(rows()),
+    );
+    const expandedRows = rows().length;
+    check(
+      "click: clicking the last prompt row collapses it again",
+      click(expandedRows - 1) !== undefined && rows().length === 1,
+      JSON.stringify(rows()),
+    );
+
+    click(0);
+    call("input", { source: "interactive", text: longPrompt });
+    check(
+      "click: a new prompt starts collapsed",
+      rows().length === 1,
+      JSON.stringify(rows()),
+    );
+
+    check(
+      "click: a press in the prompt block is claimed, not a selection",
+      JSON.stringify(
+        widget.handleMouse({ type: "press", button: "left", y: 0 }),
+      ) === JSON.stringify({ handled: true, render: false }),
+    );
+
+    call("session_shutdown", { reason: "quit" });
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(tempAgent, { recursive: true, force: true });
+  }
+}
+
 // --- Idle collapse -----------------------------------------------------------
 
 {
