@@ -104,9 +104,9 @@ the value still applies for the session and you are warned once.
 ## Behaviour
 
 - **Prompt.** The pinned prompt is one ellipsized row. Clicking it — the `❯` or any text on the
-  row — expands the full text in place, wrapped under the text column, and clicking again
-  collapses it. Expansion is capped by the panel budget and ends with `… N more lines` when the
-  prompt is longer than that. A new prompt always starts collapsed.
+  row — expands the full text in place, wrapped under the text column and opened at its first
+  line, and clicking again collapses it. A prompt longer than the panel is not truncated: scroll
+  it with the mouse wheel. A new prompt always starts collapsed.
 - **Depth.** The live tree is the current run. Each completed turn compresses to one line
   (`✓ turn 3 · 2 tools · 8.4s`), newest at the bottom. Collapsed, only the newest `pastTurns` are
   shown; expanding the panel (`ctrl+o`, or `expand: "always"`) reveals every turn the session
@@ -122,12 +122,12 @@ the value still applies for the session and you are warned once.
   calls stay in event order.
 - **Expansion** follows `ctrl+o` (Pi's built-in tool expansion) in `follow` mode: arguments up to
   3 wrapped lines plus a result preview up to 5 lines, errors in the error colour, and every
-  retained turn instead of the newest `pastTurns`. Expanded output may grow past the row budget
-  but never past 48 lines or 60% of the terminal; beyond that the oldest rows fold into a single
-  `… N earlier` line.
-- **Budget.** Overflow folds the oldest rows into a single `… N earlier` line. Below 60 columns
-  the duration column is dropped, below 48 the diffstat, below 40 the live turn collapses to one
-  line.
+  retained turn instead of the newest `pastTurns`. Expanded output is windowed to 48 lines or 60%
+  of the terminal, whichever is larger, and scrolls inside the panel — the wheel over the panel
+  moves it one to five rows at a time, and `… N earlier` / `… N more` markers show what is
+  off-screen. Wheel events fall through to the transcript whenever the panel fits on screen.
+- **Budget.** The window shows the newest rows by default. Below 60 columns the duration column
+  is dropped, below 48 the diffstat, below 40 the live turn collapses to one line.
 - **Lifecycle.** Hidden until your first prompt. Once a run settles, the panel collapses to one
   row of totals — `✓ 5 turns · 13 tools · 54s`, summed over every turn of that run, including
   turns `pastTurns` no longer keeps on screen — and expands back automatically as soon as the next
@@ -162,9 +162,10 @@ cannot detect a layout bug.
 
 ## Limitations
 
-- Mouse: only the prompt block is clickable. Other rows are display-only; use `ctrl+o` to expand.
-  Clicks require Pi's fullscreen TUI (`tuiMode: "fullscreen"`, the default) — regular mode leaves
-  mouse reporting to the terminal, so no click events reach extensions there.
+- Mouse: the prompt block is clickable and the panel scrolls under the wheel. Other rows are
+  display-only; use `ctrl+o` to expand. Clicks and wheel events require Pi's fullscreen TUI
+  (`tuiMode: "fullscreen"`, the default) — regular mode leaves mouse reporting to the terminal,
+  so no mouse events reach extensions there.
 - No jump-to-block: the Pi extension API has no transcript scroll hook, so a tree row cannot take
   you to the corresponding conversation block. Each turn is still retained as its own record so a
   future navigation hook can target it.

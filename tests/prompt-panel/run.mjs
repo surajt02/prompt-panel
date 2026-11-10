@@ -1659,15 +1659,15 @@ for (const glyphs of ["unicode", "ascii"]) {
     JSON.stringify(collapsed),
   );
 
-  let promptRows = -1;
+  let promptLayout;
   const expandedLines = renderPanel(
     { ...base, promptExpanded: true },
     {
       config: cfg({ pastTurns: 0 }),
       expanded: false,
       terminalRows: 40,
-      onPromptRows: (rows) => {
-        promptRows = rows;
+      onLayout: (layout) => {
+        promptLayout = layout;
       },
     },
     60,
@@ -1687,9 +1687,11 @@ for (const glyphs of ["unicode", "ascii"]) {
     expandedLines.every((line) => visibleWidth(line) <= 60),
   );
   check(
-    "prompt: onPromptRows reports the expanded row count",
-    promptRows === expanded.length,
-    `rows=${promptRows} lines=${expanded.length}`,
+    "prompt: onLayout reports the prompt rows as the click target",
+    promptLayout.promptStart === 0 &&
+      promptLayout.promptEnd === expanded.length &&
+      promptLayout.maxScrollOffset === 0,
+    JSON.stringify(promptLayout),
   );
 
   const multiParagraph = renderPanel(
@@ -1705,22 +1707,66 @@ for (const glyphs of ["unicode", "ascii"]) {
     JSON.stringify(multiParagraph),
   );
 
-  const capped = renderPanel(
-    {
-      ...base,
-      prompt: "word ".repeat(200),
-      promptExpanded: true,
-      pastTurns: [],
-      currentTurn: null,
-    },
-    { config: cfg({ pastTurns: 0, maxRows: 5 }), expanded: false, terminalRows: 24 },
-    40,
-    theme,
-  ).map(plain);
+  // A prompt longer than the panel is not truncated any more: it is windowed,
+  // and scrolling reaches the rest.
+  const hugeState = {
+    ...base,
+    prompt: "word ".repeat(200),
+    promptExpanded: true,
+  };
+  const hugeView = (scroll) => {
+    let layout;
+    const lines = renderPanel(
+      { ...hugeState, scroll },
+      {
+        config: cfg({ pastTurns: 0, maxRows: 5 }),
+        expanded: false,
+        terminalRows: 24,
+        onLayout: (next) => {
+          layout = next;
+        },
+      },
+      40,
+      theme,
+    ).map(plain);
+    return { lines, layout };
+  };
+
+  const tail = hugeView(0);
   check(
-    "prompt: a huge prompt is capped and admits how much is hidden",
-    capped.length <= 5 && capped.some((line) => /… \d+ more lines/.test(line)),
-    JSON.stringify(capped),
+    "scroll: a long prompt shows its tail with an earlier marker",
+    tail.lines.length === 5 &&
+      /^\s*… \d+ earlier$/.test(tail.lines[0]) &&
+      tail.layout.scrollOffset === 0 &&
+      tail.layout.maxScrollOffset > 0 &&
+      tail.layout.promptStart === 1 &&
+      tail.layout.promptEnd === 5,
+    JSON.stringify(tail),
+  );
+  const top = hugeView(Number.POSITIVE_INFINITY);
+  check(
+    "scroll: scrolling to the top starts at the prompt's first line",
+    top.lines[0].startsWith("❯ word") &&
+      /^\s*… \d+ more$/.test(top.lines[4]) &&
+      top.layout.scrollOffset === top.layout.maxScrollOffset &&
+      top.layout.promptStart === 0 &&
+      top.layout.promptEnd === 4,
+    JSON.stringify(top),
+  );
+  const middle = hugeView(2);
+  check(
+    "scroll: a mid offset keeps markers on both ends",
+    /^\s*… \d+ earlier$/.test(middle.lines[0]) &&
+      /^\s*… \d+ more$/.test(middle.lines[4]) &&
+      middle.layout.scrollOffset === 2,
+    JSON.stringify(middle),
+  );
+  const clamped = hugeView(9999);
+  check(
+    "scroll: an offset past the end clamps to the top",
+    clamped.layout.scrollOffset === clamped.layout.maxScrollOffset &&
+      clamped.lines[0].startsWith("❯ word"),
+    JSON.stringify(clamped.layout),
   );
 
   check(
@@ -1728,15 +1774,15 @@ for (const glyphs of ["unicode", "ascii"]) {
     render(base, cfg({ pastTurns: 0 }), 60).length === 1,
   );
 
-  let idlePromptRows = -1;
+  let idleLayout;
   renderPanel(
     { ...base, phase: "idle", currentTurn: null, run: null, promptExpanded: true },
     {
       config: cfg({ pastTurns: 0 }),
       expanded: false,
       terminalRows: 40,
-      onPromptRows: (rows) => {
-        idlePromptRows = rows;
+      onLayout: (layout) => {
+        idleLayout = layout;
       },
     },
     60,
@@ -1744,8 +1790,10 @@ for (const glyphs of ["unicode", "ascii"]) {
   );
   check(
     "prompt: a collapsed idle glyph reports no prompt rows to click",
-    idlePromptRows === 0,
-    `rows=${idlePromptRows}`,
+    idleLayout.promptStart === 0 &&
+      idleLayout.promptEnd === 0 &&
+      idleLayout.maxScrollOffset === 0,
+    JSON.stringify(idleLayout),
   );
 }
 
@@ -1832,6 +1880,109 @@ for (const glyphs of ["unicode", "ascii"]) {
       JSON.stringify(
         widget.handleMouse({ type: "press", button: "left", y: 0 }),
       ) === JSON.stringify({ handled: true, render: false }),
+    );
+
+    call("session_shutdown", { reason: "quit" });
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(tempAgent, { recursive: true, force: true });
+  }
+}
+
+// --- Panel scroll -------------------------------------------------------------
+
+{
+  const tempAgent = mkdtempSync(join(here, ".tmp-agent-scroll-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = tempAgent;
+  writeFileSync(
+    join(tempAgent, "prompt-panel.json"),
+    JSON.stringify({ maxRows: 2 }),
+  );
+  try {
+    const longPrompt =
+      "refactor the auth middleware to use the new token store, keep the old " +
+      "session cookie path working for one release, and add a migration note " +
+      "to the changelog";
+    const handlers = new Map();
+    let widget;
+    mod.default({
+      on(name, handler) {
+        handlers.set(name, handler);
+      },
+      registerCommand() {},
+    });
+    const ui = {
+      notify() {},
+      setWidget(_key, content) {
+        widget =
+          typeof content === "function"
+            ? content({ terminal: { rows: 30 }, requestRender() {} }, theme)
+            : undefined;
+      },
+      getToolsExpanded() {
+        return false;
+      },
+    };
+    const ctx = { mode: "tui", ui };
+    const call = (name, event) => handlers.get(name)?.(event, ctx);
+    const rows = () => widget.render(60).map(plain);
+    const click = (y) => {
+      widget.handleMouse({ type: "press", button: "left", y });
+      return widget.handleMouse({ type: "click", button: "left", y });
+    };
+    const wheel = (delta) =>
+      widget.handleMouse({ type: "wheel", button: "none", wheelDelta: delta, y: 0 });
+
+    call("session_start", { reason: "startup" });
+    call("input", { source: "interactive", text: longPrompt });
+    check(
+      "scroll: the wheel falls through while the panel fits",
+      wheel(-1) === undefined && rows().length === 1,
+    );
+
+    click(0);
+    const top = rows();
+    check(
+      "scroll: expanding a long prompt opens at its first line",
+      top.length === 2 &&
+        top[0].startsWith("❯ refactor") &&
+        /… \d+ more$/.test(top[1]),
+      JSON.stringify(top),
+    );
+
+    check(
+      "scroll: wheel down reveals the newest rows",
+      wheel(1) !== undefined && /^\s*… \d+ earlier$/.test(rows()[0]),
+      JSON.stringify(rows()),
+    );
+
+    check(
+      "scroll: at the tail the wheel still reports handled",
+      wheel(1) !== undefined && !/… \d+ more$/.test(rows()[1]),
+      JSON.stringify(rows()),
+    );
+
+    check(
+      "scroll: a click on the earlier marker is not a prompt click",
+      click(0) === undefined && /^\s*… \d+ earlier$/.test(rows()[0]),
+      JSON.stringify(rows()),
+    );
+
+    check(
+      "scroll: a click on a visible prompt row collapses it",
+      click(1) !== undefined && rows().length === 1,
+      JSON.stringify(rows()),
+    );
+
+    click(0);
+    wheel(-1);
+    call("input", { source: "interactive", text: longPrompt });
+    check(
+      "scroll: a new prompt resets the offset",
+      rows().length === 1 && wheel(-1) === undefined,
+      JSON.stringify(rows()),
     );
 
     call("session_shutdown", { reason: "quit" });

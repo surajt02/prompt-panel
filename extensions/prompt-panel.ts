@@ -130,6 +130,8 @@ export interface PanelState {
   prompt?: string;
   /** True while the prompt block is expanded in place (clicked open). */
   promptExpanded?: boolean;
+  /** Rows scrolled up from the bottom of the panel; 0 = pinned to the newest. */
+  scroll?: number;
   pastTurns?: PastTurn[];
   currentTurn?: TurnRecord | null;
   /** Totals of the run in progress or just finished; authoritative when present. */
@@ -141,15 +143,25 @@ export interface PanelState {
   turnCounter?: number;
 }
 
+/** Where the parts of the panel landed in the last rendered window. */
+export interface PanelLayout {
+  /** Window-relative row indices of the visible prompt block. */
+  promptStart: number;
+  promptEnd: number;
+  scrollOffset: number;
+  maxScrollOffset: number;
+  totalRows: number;
+}
+
 export interface PanelRenderOptions {
   config?: Partial<PanelConfig>;
   expanded?: boolean;
   terminalRows?: number;
   /**
-   * Receives the number of rows the prompt block occupied, so a host can map a
-   * click's local y coordinate onto it.
+   * Reports the rendered window, so a host can map a click's local y onto the
+   * prompt block and clamp its own scroll offset.
    */
-  onPromptRows?: (rows: number) => void;
+  onLayout?: (layout: PanelLayout) => void;
 }
 
 interface ThemeLike {
@@ -948,7 +960,6 @@ function renderPromptRows(
   width: number,
   theme: ThemeLike,
   expanded: boolean,
-  maxLines: number,
 ): string[] {
   const glyphs = glyphsFor(config.glyphs);
   const prefix = `${glyphs.prompt} `;
@@ -981,22 +992,8 @@ function renderPromptRows(
   }
   while (wrapped.length > 0 && wrapped[wrapped.length - 1] === "") wrapped.pop();
 
-  const limit = Math.max(1, Math.floor(maxLines));
-  let marker = -1;
-  if (wrapped.length > limit) {
-    const hidden = wrapped.length - (limit - 1);
-    wrapped.length = limit - 1;
-    marker = wrapped.length;
-    wrapped.push(
-      `${glyphs.ellipsis} ${hidden} more line${hidden === 1 ? "" : "s"}`,
-    );
-  }
-
   return wrapped.map((text, index) => {
     if (text === "") return "";
-    if (index === marker) {
-      return paint(theme, "dim", `${indent}${text}`);
-    }
     const lead = index === 0 ? paint(theme, "accent", prefix) : indent;
     return lead + paint(theme, "text", text);
   });
@@ -1014,7 +1011,13 @@ export function renderPanel(
 ): string[] {
   const safeWidth = Math.max(0, Math.floor(width));
   if (safeWidth === 0) {
-    options?.onPromptRows?.(0);
+    options?.onLayout?.({
+      promptStart: 0,
+      promptEnd: 0,
+      scrollOffset: 0,
+      maxScrollOffset: 0,
+      totalRows: 0,
+    });
     return [];
   }
 
@@ -1041,7 +1044,13 @@ export function renderPanel(
   // so a new run expands on its own without a keypress. Expanding the panel
   // also reveals the finished tree, so the glyph is never a dead end.
   if (config.idleMode !== "full" && !expanded && isIdlePanel(state)) {
-    options?.onPromptRows?.(0);
+    options?.onLayout?.({
+      promptStart: 0,
+      promptEnd: 0,
+      scrollOffset: 0,
+      maxScrollOffset: 0,
+      totalRows: 0,
+    });
     if (config.idleMode === "hidden") return [];
     const run = runTotals(state);
     // Nothing to summarize is the same as nothing to show.
@@ -1060,15 +1069,9 @@ export function renderPanel(
           safeWidth,
           theme,
           state.promptExpanded === true,
-          // Keep one row for the body: expanding a huge prompt must not swallow
-          // the whole panel.
-          Math.max(1, Math.min(HARD_MAX_ROWS - 1, cap - 1)),
         )
       : [];
-  options?.onPromptRows?.(promptBlock.length);
-  const lines: string[] = [...promptBlock];
-
-  const body: string[] = [];
+  const content: string[] = [...promptBlock];
   const pastTurns = Array.isArray(state.pastTurns) ? state.pastTurns : [];
   // `pastTurns` is the collapsed depth. Expanding the panel (ctrl+o, or
   // `expand: "always"`) reveals every turn still retained in the session.
@@ -1078,17 +1081,17 @@ export function renderPanel(
       ? []
       : pastTurns.slice(-config.pastTurns);
   for (const past of visiblePast) {
-    body.push(formatPastTurn(past, config, theme));
+    content.push(formatPastTurn(past, config, theme));
   }
 
   for (const notice of state.notices ?? []) {
     if (notice === "compacted") {
-      body.push(paint(theme, "dim", `  ${glyphs.compact} compacted`));
+      content.push(paint(theme, "dim", `  ${glyphs.compact} compacted`));
     }
   }
 
   if (state.currentTurn) {
-    body.push(
+    content.push(
       ...renderTurn(
         state.currentTurn,
         config,
@@ -1101,26 +1104,58 @@ export function renderPanel(
   }
 
   for (const queued of state.queued ?? []) {
-    body.push(renderQueuedRow(queued, config, safeWidth, theme));
+    content.push(renderQueuedRow(queued, config, safeWidth, theme));
   }
 
-  const promptRows = lines.length;
-  const bodyCap = Math.max(0, Math.min(HARD_MAX_ROWS - promptRows, cap - promptRows));
-  if (body.length > bodyCap) {
-    const keep = Math.max(0, bodyCap - 1);
-    const dropped = body.length - keep;
-    body.splice(0, dropped);
-    if (bodyCap >= 1) {
-      body.unshift(
-        paint(theme, "dim", `  ${glyphs.ellipsis} ${dropped} earlier`),
-      );
-    } else {
-      body.length = 0;
-    }
+  // Window the content instead of folding it away: scrolling up reveals the
+  // rows that the budget hides, and the markers say how many are off-screen.
+  const totalRows = content.length;
+  const maxScrollOffset = Math.max(0, totalRows - cap);
+  const requested = state.scroll ?? 0;
+  const scrollOffset = Math.max(
+    0,
+    Math.min(maxScrollOffset, Math.floor(Number.isFinite(requested) ? requested : maxScrollOffset)),
+  );
+  const end = totalRows - scrollOffset;
+  const start = Math.max(0, end - cap);
+  const windowRows = content.slice(start, end);
+  const below = totalRows - end;
+  if (start > 0 && windowRows.length > 0) {
+    windowRows[0] = paint(
+      theme,
+      "dim",
+      `  ${glyphs.ellipsis} ${start} earlier`,
+    );
+  }
+  if (below > 0 && windowRows.length > 0) {
+    windowRows[windowRows.length - 1] = paint(
+      theme,
+      "dim",
+      `  ${glyphs.ellipsis} ${below} more`,
+    );
   }
 
-  lines.push(...body);
-  return lines.map((line) => truncateToWidth(line, safeWidth, "", false));
+  // Prompt block range within the window, excluding the scroll markers.
+  const promptVisibleEnd = Math.min(promptBlock.length - start, windowRows.length);
+  let promptStart = 0;
+  let promptEnd = Math.max(0, promptVisibleEnd);
+  if (start > 0 && promptEnd > 0) promptStart = 1;
+  if (below > 0 && promptEnd > promptStart) {
+    promptEnd = Math.min(promptEnd, windowRows.length - 1);
+  }
+  if (promptEnd <= promptStart) {
+    promptStart = 0;
+    promptEnd = 0;
+  }
+  options?.onLayout?.({
+    promptStart,
+    promptEnd,
+    scrollOffset,
+    maxScrollOffset,
+    totalRows,
+  });
+
+  return windowRows.map((line) => truncateToWidth(line, safeWidth, "", false));
 }
 
 // ---------------------------------------------------------------------------
@@ -1226,6 +1261,7 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
     phase: "hidden",
     prompt: "",
     promptExpanded: false,
+    scroll: 0,
     pastTurns: [],
     currentTurn: null,
     run: { turns: 0, tools: 0, durationMs: 0 },
@@ -1296,6 +1332,7 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
     state.phase = "hidden";
     state.prompt = "";
     state.promptExpanded = false;
+    state.scroll = 0;
     state.pastTurns = [];
     state.currentTurn = null;
     state.run = { turns: 0, tools: 0, durationMs: 0 };
@@ -1419,9 +1456,14 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
         const token = {};
         componentToken = token;
         requestRender = () => tui.requestRender();
-        // Rows the prompt block occupied in the last render; the only region
-        // that reacts to clicks.
-        let promptRows = 0;
+        // Where the prompt block and the scroll window landed last render.
+        let layout: PanelLayout = {
+          promptStart: 0,
+          promptEnd: 0,
+          scrollOffset: 0,
+          maxScrollOffset: 0,
+          totalRows: 0,
+        };
         return {
           render(width: number): string[] {
             return renderPanel(
@@ -1430,8 +1472,10 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
                 config,
                 expanded: ctx.ui.getToolsExpanded(),
                 terminalRows: tui.terminal?.rows ?? process.stdout.rows ?? 24,
-                onPromptRows: (rows) => {
-                  promptRows = rows;
+                onLayout: (next) => {
+                  layout = next;
+                  // Keep the stored offset clamped to what actually fits.
+                  state.scroll = next.scrollOffset;
                 },
               },
               width,
@@ -1441,13 +1485,36 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
           handleMouse(
             event: TuiMouseEvent,
           ): TuiMouseEventResult | undefined {
+            // The wheel scrolls the panel only when it actually overflows;
+            // otherwise it keeps scrolling the transcript.
+            if (event.type === "wheel") {
+              if (layout.maxScrollOffset <= 0) return undefined;
+              const step = Math.max(
+                1,
+                Math.min(5, Math.abs(event.wheelDelta ?? 1)),
+              );
+              const up = (event.wheelDelta ?? 0) < 0;
+              const next = up
+                ? layout.scrollOffset + step
+                : layout.scrollOffset - step;
+              state.scroll = Math.max(
+                0,
+                Math.min(layout.maxScrollOffset, next),
+              );
+              return { handled: true };
+            }
             if (event.button !== "left") return undefined;
-            if (event.y < 0 || event.y >= promptRows) return undefined;
+            if (event.y < layout.promptStart || event.y >= layout.promptEnd) {
+              return undefined;
+            }
             // Handle the press so the renderer addresses the click to this
             // component instead of starting a transcript selection.
             if (event.type === "press") return { handled: true, render: false };
             if (event.type !== "click") return undefined;
-            state.promptExpanded = state.promptExpanded !== true;
+            const expanding = state.promptExpanded !== true;
+            state.promptExpanded = expanding;
+            // Open at the prompt's first line, not wherever the view was.
+            if (expanding) state.scroll = Number.POSITIVE_INFINITY;
             return { handled: true };
           },
           invalidate(): void {
@@ -1528,8 +1595,9 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
 
     promptSeen = true;
     state.prompt = String(event.text ?? "");
-    // A new ask starts collapsed, even if the previous one was clicked open.
+    // A new ask starts collapsed and pinned to its own content.
     state.promptExpanded = false;
+    state.scroll = 0;
     state.now = Date.now();
     finalizeTurn(state.currentTurn);
     archiveCurrentTurn();
