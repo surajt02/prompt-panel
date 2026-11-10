@@ -204,3 +204,7 @@ it was verified against.
 - Expanded detail covers the live turn only; completed turns are one-liners by design.
 - Width handling is delegated to `@earendil-works/pi-tui`, so the effective version is whatever
   Pi maps extension imports to.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).

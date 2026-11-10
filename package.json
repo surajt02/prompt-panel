@@ -2,6 +2,7 @@
   "name": "prompt-panel",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Pi extension: keeps your current prompt pinned above the input and renders a live, Claude-Code-style tree of what the agent is doing",
   "keywords": [
