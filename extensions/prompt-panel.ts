@@ -197,6 +197,8 @@ interface Glyphs {
   compact: string;
   vertical: string;
   minus: string;
+  /** Horizontal rule used by the settings pane's dividers. */
+  rule: string;
 }
 
 function glyphsFor(mode: GlyphMode): Glyphs {
@@ -215,6 +217,7 @@ function glyphsFor(mode: GlyphMode): Glyphs {
       compact: "...",
       vertical: "|",
       minus: "-",
+      rule: "-",
     };
   }
   return {
@@ -231,6 +234,7 @@ function glyphsFor(mode: GlyphMode): Glyphs {
     compact: "⋯",
     vertical: "│",
     minus: "−",
+    rule: "─",
   };
 }
 
@@ -1856,6 +1860,14 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
         },
         () => done(undefined),
       );
+      // Same full-width rule Pi draws above and below `/settings`.
+      const divider = {
+        render(width: number): string[] {
+          const rule = glyphsFor(config.glyphs).rule;
+          return [theme.fg("border", rule.repeat(Math.max(1, width)))];
+        },
+        invalidate(): void {},
+      };
       const heading = {
         render(width: number): string[] {
           return [
@@ -1866,11 +1878,13 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
         },
         invalidate(): void {},
       };
-      // The list is offset by the heading, and its mouse hit test is local.
-      const headingRows = 3;
+      // Everything above the list: the rule, then the heading.
+      const rowsBeforeList = 4;
       const container = new Container();
+      container.addChild(divider);
       container.addChild(heading);
       container.addChild(list);
+      container.addChild(divider);
       return {
         // PageUp/PageDown page the list instead of scrolling the transcript.
         capturesViewportInput: list.capturesViewportInput,
@@ -1887,7 +1901,7 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
         handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
           const result = list.handleMouse?.({
             ...event,
-            y: event.y - headingRows,
+            y: event.y - rowsBeforeList,
           });
           if (result) tui.requestRender();
           return result;

@@ -2623,9 +2623,23 @@ for (const glyphs of ["unicode", "ascii"]) {
 
     check(
       "pane: the title and config path are rendered above the list",
-      pane.render(160).map(plain)[0].includes("prompt-panel") &&
-        pane.render(160).map(plain)[1].includes(join(tempAgent, "prompt-panel.json")),
-      JSON.stringify(pane.render(160).map(plain).slice(0, 3)),
+      pane.render(160).map(plain)[1].includes("prompt-panel") &&
+        pane.render(160).map(plain)[2].includes(join(tempAgent, "prompt-panel.json")),
+      JSON.stringify(pane.render(160).map(plain).slice(0, 4)),
+    );
+    check(
+      "pane: full-width rules divide the pane above and below, like /settings",
+      (() => {
+        const rows = lines();
+        const rule = "─".repeat(70);
+        return (
+          rows.length > 8 &&
+          rows[0] === rule &&
+          rows[rows.length - 1] === rule &&
+          rows.every((line) => visibleWidth(line) <= 70)
+        );
+      })(),
+      JSON.stringify(lines().slice(0, 2).concat(lines().slice(-2))),
     );
     check(
       "pane: the first row is selected and the list pages in fullscreen",
@@ -2684,13 +2698,22 @@ for (const glyphs of ["unicode", "ascii"]) {
         pane.handleMouse(event);
         const result = pane.handleMouse({ ...event, type: "click" });
         return (
-          index > 3 &&
+          index > 4 &&
           result !== undefined &&
           valueOf("showPrompt") === "off" &&
           saved().showPrompt === false
         );
       })(),
       JSON.stringify({ rows: lines().slice(3, 10), saved: saved() }),
+    );
+    check(
+      "pane: the dividers follow the ascii glyph setting",
+      selectRow("glyphs") &&
+        key(" ") &&
+        valueOf("glyphs") === "ascii" &&
+        lines()[0] === "-".repeat(70) &&
+        saved().glyphs === "ascii",
+      JSON.stringify({ value: valueOf("glyphs"), top: lines()[0]?.slice(0, 8) }),
     );
     check(
       "pane: a description explains the selected row",
