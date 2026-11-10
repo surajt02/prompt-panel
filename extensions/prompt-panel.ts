@@ -548,6 +548,37 @@ function settingsListTheme(theme: ThemeLike): SettingsListTheme {
   };
 }
 
+/**
+ * Fit one line of prose by cutting at a word boundary. The clip only backs up
+ * when it lands inside a word, so a cut that already falls between words keeps
+ * the last complete one. A single token wider than the line still gets a hard
+ * cut — there is no boundary to find — and the result always fits `width`.
+ */
+function truncateAtWord(
+  text: string,
+  width: number,
+  ellipsis: string,
+): string {
+  if (visibleWidth(text) <= width) return text;
+  const room = Math.max(0, width - visibleWidth(ellipsis));
+  // `truncateToWidth` leaves a reset sequence on the clip, so measure the
+  // original by the plain prefix instead of by string length.
+  const head = truncateToWidth(text, room, "", false).replace(
+    /\x1b\[[0-9;]*m/g,
+    "",
+  );
+  const rest = text.startsWith(head) ? text.slice(head.length) : "";
+  if (rest !== "" && !/^\s/.test(rest)) {
+    // Mid-word: fall back to the last space in the visible prefix.
+    const boundary = head.search(/\s\S*$/);
+    if (boundary > 0) {
+      const cut = head.slice(0, boundary).replace(/\s+$/, "");
+      if (cut !== "") return cut + ellipsis;
+    }
+  }
+  return head.replace(/\s+$/, "") + ellipsis;
+}
+
 /** Ellipsize the middle of a path while keeping its basename visible. */
 export function middleEllipsize(
   text: string,
@@ -1174,11 +1205,10 @@ function renderPromptRows(
   const raw = String(prompt ?? "").replace(/\r\n?/g, "\n");
 
   if (!expanded) {
-    const text = truncateToWidth(
+    const text = truncateAtWord(
       collapseWhitespace(raw),
       available,
       glyphs.ellipsis,
-      false,
     );
     return [paint(theme, "accent", prefix) + paint(theme, "text", text)];
   }

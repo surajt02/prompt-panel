@@ -107,10 +107,12 @@ the value still applies for the session and you are warned once.
 
 ## Behaviour
 
-- **Prompt.** The pinned prompt is one ellipsized row. Clicking it — the `❯` or any text on the
-  row — expands the full text in place, wrapped under the text column and opened at its first
-  line, and clicking again collapses it. A prompt longer than the panel is not truncated: scroll
-  it with the mouse wheel. A new prompt always starts collapsed.
+- **Prompt.** The pinned prompt is one row, ellipsized at a word boundary so the last visible
+  word is never chopped in half; only a single token longer than the row is cut where it has to
+  be. Clicking it — the `❯` or any text on the row — expands the full text in place, wrapped
+  under the text column and opened at its first line, and clicking again collapses it. An
+  expanded prompt longer than the panel is not truncated: scroll it with the mouse wheel. A new
+  prompt always starts collapsed.
 - **Depth.** `display` picks how much of the run the tree keeps, and `/panel display` (or the
   settings pane) switches it while you work:
 

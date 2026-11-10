@@ -1714,6 +1714,81 @@ for (const glyphs of ["unicode", "ascii"]) {
   );
 }
 
+// --- Prompt truncation --------------------------------------------------------
+// The collapsed prompt is one row, cut at a word boundary so the last visible
+// token is never chopped in half.
+
+{
+  const base = makeState({
+    currentTurn: null,
+    pastTurns: [],
+    queued: [],
+    notices: [],
+  });
+  const row = (prompt, width = 60, overrides = {}) =>
+    plain(
+      render({ ...base, prompt }, cfg({ display: "minimal", ...overrides }), width)[0] ??
+        "",
+    );
+  const bodyOf = (line) => line.replace(/^[>❯] /, "").replace(/(…|\.\.\.)$/, "");
+  const endsAtWordBoundary = (prompt, line) => {
+    const next = prompt.charAt(bodyOf(line).length);
+    return next === "" || /\s/.test(next);
+  };
+  const longPrompt =
+    "refactor the authentication middleware to use the new token store";
+
+  check(
+    "prompt: a prompt that fits is untouched",
+    row("refactor auth") === "❯ refactor auth",
+  );
+  check(
+    "prompt: truncation lands on a word boundary, not mid-word",
+    (() => {
+      const line = row(longPrompt, 40);
+      return (
+        line.endsWith("…") &&
+        endsAtWordBoundary(longPrompt, line) &&
+        !/\s…$/.test(line) &&
+        visibleWidth(line) <= 40
+      );
+    })(),
+    JSON.stringify(row(longPrompt, 40)),
+  );
+  check(
+    "prompt: a word ending exactly at the clip is kept",
+    row("alpha beta gamma", 13) === "❯ alpha beta…",
+    JSON.stringify(row("alpha beta gamma", 13)),
+  );
+  check(
+    "prompt: a chopped word is dropped whole",
+    row("alpha beta gamma", 12) === "❯ alpha…",
+    JSON.stringify(row("alpha beta gamma", 12)),
+  );
+  check(
+    "prompt: a single token with no boundary still gets a hard cut",
+    (() => {
+      const line = row("x".repeat(80), 20);
+      return line.endsWith("…") && visibleWidth(line) <= 20;
+    })(),
+    JSON.stringify(row("x".repeat(80), 20)),
+  );
+  check(
+    "prompt: word boundaries hold at every width and in ascii mode",
+    [40, 48, 60].every((width) => {
+      const ansiLine = row(longPrompt, width);
+      const asciiLine = row(longPrompt, width, { glyphs: "ascii" });
+      return (
+        endsAtWordBoundary(longPrompt, ansiLine) &&
+        endsAtWordBoundary(longPrompt, asciiLine) &&
+        visibleWidth(ansiLine) <= width &&
+        visibleWidth(asciiLine) <= width
+      );
+    }),
+    JSON.stringify([40, 48, 60].map((width) => row(longPrompt, width))),
+  );
+}
+
 // --- Prompt expansion ---------------------------------------------------------
 // Clicking the prompt block expands the full text in place; the renderer is
 // pure, so `promptExpanded` is plain state.
