@@ -35,6 +35,7 @@ try {
 
 const {
   DEFAULT_CONFIG,
+  applySettingValue,
   parseConfig,
   effectiveRowBudget,
   middleEllipsize,
@@ -42,6 +43,7 @@ const {
   summarizeToolArgs,
   countEditDiff,
   renderPanel,
+  settingsItems,
 } = mod;
 
 // Collapsed baseline: the shipped default is expand:"always", but these cases
@@ -153,12 +155,14 @@ function describeOverflow(lines, width) {
 {
   const expected = [
     "DEFAULT_CONFIG",
+    "applySettingValue",
     "countEditDiff",
     "effectiveRowBudget",
     "formatDuration",
     "middleEllipsize",
     "parseConfig",
     "renderPanel",
+    "settingsItems",
     "summarizeToolArgs",
   ].sort();
   const actual = Object.keys(mod)
@@ -969,7 +973,7 @@ for (const width of [10, 40, 60, 200]) {
       `first=${JSON.stringify(firstRunNumbers)} second=${JSON.stringify(numbers)}`,
     );
 
-    await command.handler("", ctx);
+    await command.handler("status", ctx);
     const status = notifications[notifications.length - 1];
     check(
       "lifecycle: /panel reports enabled state, row budget, and config path",
@@ -2400,6 +2404,323 @@ for (const glyphs of ["unicode", "ascii"]) {
       );
     }),
   );
+}
+
+
+// --- animate stops the timer -------------------------------------------------
+// `animate: false` freezes the glyph; the interval has nothing left to do, so it
+// must not run. Turning it back on (or resetting) restarts it for a live run.
+
+{
+  const tempAgent = mkdtempSync(join(here, ".tmp-agent-animate-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const realSetInterval = globalThis.setInterval;
+  const realClearInterval = globalThis.clearInterval;
+  const live = new Set();
+  process.env.PI_CODING_AGENT_DIR = tempAgent;
+  writeFileSync(
+    join(tempAgent, "prompt-panel.json"),
+    JSON.stringify({ animate: false, tickMs: 50 }),
+  );
+  globalThis.setInterval = (fn, ms) => {
+    const id = { fn, ms };
+    live.add(id);
+    return id;
+  };
+  globalThis.clearInterval = (id) => {
+    live.delete(id);
+  };
+  try {
+    let command;
+    const handlers = new Map();
+    mod.default({
+      on(name, handler) {
+        handlers.set(name, handler);
+      },
+      registerCommand(name, options) {
+        if (name === "panel") command = options;
+      },
+    });
+    const ui = {
+      notify() {},
+      setWidget() {},
+      getToolsExpanded() {
+        return false;
+      },
+    };
+    const ctx = { mode: "tui", ui };
+    const call = (name, event = {}) => handlers.get(name)?.(event, ctx);
+
+    call("session_start", { reason: "startup" });
+    call("input", { source: "interactive", text: "animate off" });
+    call("agent_start", {});
+    check(
+      "animate: off means a live run starts no interval",
+      live.size === 0,
+      JSON.stringify({ live: live.size }),
+    );
+
+    await command.handler("reset", ctx);
+    check(
+      "animate: reset back to the defaults restarts the interval for a live run",
+      live.size === 1,
+      JSON.stringify({ live: live.size }),
+    );
+
+    call("agent_settled", { aborted: false });
+    check(
+      "animate: settling the run stops the interval",
+      live.size === 0,
+      JSON.stringify({ live: live.size }),
+    );
+  } finally {
+    globalThis.setInterval = realSetInterval;
+    globalThis.clearInterval = realClearInterval;
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(tempAgent, { recursive: true, force: true });
+  }
+}
+
+// --- Settings model ----------------------------------------------------------
+// The pane is a thin shell over pure helpers: one row per config key, and a
+// validated apply. Both are checked directly so a new config key cannot ship
+// without a way to edit it.
+
+{
+  const ids = settingsItems(DEFAULT_CONFIG).map((item) => item.id).sort();
+  const keys = Object.keys(DEFAULT_CONFIG).sort();
+  check(
+    "pane: every config key has a settings row",
+    ids.join(",") === keys.join(","),
+    `ids=${ids.join(",")} keys=${keys.join(",")}`,
+  );
+  check(
+    "pane: every row starts on a value the row can cycle to",
+    settingsItems(DEFAULT_CONFIG).every(
+      (item) => Array.isArray(item.values) && item.values.includes(item.currentValue),
+    ),
+  );
+  check(
+    "pane: rows carry a description for the selected-item hint",
+    settingsItems(DEFAULT_CONFIG).every(
+      (item) => typeof item.description === "string" && item.description.length > 0,
+    ),
+  );
+
+  const base = { ...DEFAULT_CONFIG };
+  check(
+    "pane: a maxRows choice becomes a number",
+    applySettingValue("maxRows", "12", base).maxRows === 12 &&
+      applySettingValue("maxRows", "auto", base).maxRows === "auto",
+  );
+  check(
+    "pane: on/off rows become booleans",
+    applySettingValue("animate", "off", base).animate === false &&
+      applySettingValue("showPrompt", "on", base).showPrompt === true,
+  );
+  check(
+    "pane: enum rows are stored verbatim",
+    applySettingValue("idleMode", "hidden", base).idleMode === "hidden" &&
+      applySettingValue("expand", "always", base).expand === "always",
+  );
+  check(
+    "pane: an unknown id leaves the config alone",
+    applySettingValue("nope", "x", base) === base,
+  );
+  check(
+    "pane: a value the config rejects leaves it alone",
+    applySettingValue("expand", "sometimes", base) === base,
+  );
+}
+
+// --- Settings pane -----------------------------------------------------------
+// /panel with no arguments opens Pi's SettingsList: arrows move, Enter/Space
+// cycle, Esc closes. Changes are written immediately, and the panel follows.
+
+{
+  const tempAgent = mkdtempSync(join(here, ".tmp-agent-pane-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = tempAgent;
+  writeFileSync(
+    join(tempAgent, "prompt-panel.json"),
+    JSON.stringify({ maxRows: 6 }),
+  );
+  try {
+    const notifications = [];
+    let command;
+    let factory;
+    let widget;
+    let closed = "unset";
+    let renders = 0;
+    mod.default({
+      on() {},
+      registerCommand(name, options) {
+        if (name === "panel") command = options;
+      },
+    });
+    const tui = {
+      terminal: { rows: 40 },
+      requestRender() {
+        renders++;
+      },
+    };
+    const ui = {
+      notify(message, type) {
+        notifications.push({ message, type });
+      },
+      setWidget(_key, content) {
+        widget =
+          typeof content === "function" ? content(tui, theme) : undefined;
+      },
+      getToolsExpanded() {
+        return false;
+      },
+      async custom(create) {
+        factory = create;
+        return undefined;
+      },
+    };
+    const ctx = { mode: "tui", ui };
+    const saved = () =>
+      JSON.parse(readFileSync(join(tempAgent, "prompt-panel.json"), "utf8"));
+
+    await command.handler("", ctx);
+    check(
+      "pane: /panel with no arguments opens the pane instead of reporting",
+      typeof factory === "function" && notifications.length === 0,
+    );
+
+    const pane = factory(tui, theme, undefined, (result) => {
+      closed = result;
+    });
+    const lines = () => pane.render(70).map(plain);
+    const cells = (line) =>
+      line
+        .replace(/^\s*(?:→\s+)?/, "")
+        .split(/\s{2,}/)
+        .map((cell) => cell.trim());
+    const cursor = () => {
+      const line = lines().find((text) => text.startsWith("→ "));
+      return line === undefined ? undefined : cells(line)[0];
+    };
+    const valueOf = (label) => {
+      const line = lines().find((text) => cells(text)[0] === label);
+      return line === undefined ? undefined : cells(line)[1];
+    };
+    const selectRow = (label) => {
+      for (let step = 0; step < 40; step++) {
+        if (cursor() === label) return true;
+        pane.handleInput("\x1b[B");
+      }
+      return false;
+    };
+    const key = (data) => {
+      const before = renders;
+      pane.handleInput(data);
+      return renders > before;
+    };
+
+    check(
+      "pane: the title and config path are rendered above the list",
+      pane.render(160).map(plain)[0].includes("prompt-panel") &&
+        pane.render(160).map(plain)[1].includes(join(tempAgent, "prompt-panel.json")),
+      JSON.stringify(pane.render(160).map(plain).slice(0, 3)),
+    );
+    check(
+      "pane: the first row is selected and the list pages in fullscreen",
+      cursor() === "enabled" && pane.capturesViewportInput === true,
+      cursor(),
+    );
+    check(
+      "pane: PageUp/PageDown are not swallowed by the panel scroll",
+      key("\x1b[B") && cursor() === "expand",
+      cursor(),
+    );
+    check(
+      "pane: arrow up wraps to the last row",
+      key("\x1b[A") !== undefined && cursor() === "enabled",
+      cursor(),
+    );
+
+    check(
+      "pane: values come from the config file",
+      valueOf("maxRows") === "6",
+      JSON.stringify(lines().slice(3, 8)),
+    );
+    check(
+      "pane: selecting a row and pressing space cycles the value",
+      selectRow("expand") && key(" ") && valueOf("expand") === "always",
+      JSON.stringify({ cursor: cursor(), value: valueOf("expand") }),
+    );
+    check(
+      "pane: the change is persisted immediately",
+      saved().expand === "always",
+      JSON.stringify(saved()),
+    );
+    check(
+      "pane: enter cycles as well",
+      key("\r") && valueOf("expand") === "never" && saved().expand === "never",
+      JSON.stringify(saved()),
+    );
+    check(
+      "pane: a numeric row stores a number, not a string",
+      selectRow("maxRows") && key(" ") && saved().maxRows === 8,
+      JSON.stringify(saved()),
+    );
+    check(
+      "pane: a boolean row stores a boolean",
+      selectRow("showThinking") &&
+        key(" ") &&
+        valueOf("showThinking") === "off" &&
+        saved().showThinking === false,
+      JSON.stringify(saved()),
+    );
+    check(
+      "pane: clicking a row selects and cycles it, offset by the heading",
+      (() => {
+        const index = lines().findIndex((line) => cells(line)[0] === "showPrompt");
+        const event = { type: "press", button: "left", x: 4, y: index };
+        pane.handleMouse(event);
+        const result = pane.handleMouse({ ...event, type: "click" });
+        return (
+          index > 3 &&
+          result !== undefined &&
+          valueOf("showPrompt") === "off" &&
+          saved().showPrompt === false
+        );
+      })(),
+      JSON.stringify({ rows: lines().slice(3, 10), saved: saved() }),
+    );
+    check(
+      "pane: a description explains the selected row",
+      selectRow("showThinking") &&
+        lines().some((line) => line.trim() === "Show the thinking row while a turn is live."),
+      JSON.stringify(lines().slice(-4)),
+    );
+
+    check(
+      "pane: switching enabled off removes the widget and persists it",
+      selectRow("enabled") && key(" ") && saved().enabled === false && widget === undefined,
+      JSON.stringify({ widget, saved: saved() }),
+    );
+    check(
+      "pane: switching it back on persists true",
+      key(" ") && saved().enabled === true,
+      JSON.stringify(saved()),
+    );
+
+    pane.handleInput("\x1b");
+    check(
+      "pane: escape closes the pane",
+      closed === undefined,
+      JSON.stringify(closed),
+    );
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(tempAgent, { recursive: true, force: true });
+  }
 }
 
 console.log("");

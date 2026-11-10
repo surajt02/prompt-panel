@@ -85,11 +85,17 @@ malformed file produces one error notification and then defaults.
 | `idleMode` | `"glyph"` | What stays on screen once nothing is running: `"glyph"` = one row of run totals (`✓ 5 turns · 13 tools · 54s`), expandable back to the full tree; `"full"` = always the finished tree; `"hidden"` = nothing (also expandable). |
 | `glyphs` | `"unicode"` | `"ascii"` for terminals without Unicode glyph support. |
 
+Every key is also editable from `/panel`, which opens a settings pane in place of the editor — arrows
+move, `Enter` or `Space` cycles the value on the selected row, page keys page the list, and `Esc`
+closes. It is Pi's own settings list, so it behaves like `/settings` and `/tools`, and each change is
+saved and applied immediately: the panel behind the pane updates as you cycle.
+
 ## Commands
 
 | Command | Effect |
 | --- | --- |
-| `/panel` | Report enabled state, row budget, expand mode, idle mode, and config path. |
+| `/panel` | Open the settings pane (arrows, `Enter`/`Space`, `Esc`). |
+| `/panel status` | Report enabled state, row budget, expand mode, idle mode, and config path. |
 | `/panel on` · `off` | Toggle the panel. |
 | `/panel rows <n\|auto>` | Set the row budget. |
 | `/panel thinking on\|off` | Toggle the thinking row. |

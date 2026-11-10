@@ -7,12 +7,19 @@ import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+  Container,
+  SettingsList,
   sliceByColumn,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import type { TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
+import type {
+  SettingItem,
+  SettingsListTheme,
+  TuiMouseEvent,
+  TuiMouseEventResult,
+} from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const WIDGET_KEY = "prompt-panel";
@@ -365,6 +372,167 @@ export function effectiveRowBudget(config: PanelConfig, terminalRows: number): n
     return Math.max(1, Math.min(HARD_MAX_ROWS, Math.floor(config.maxRows)));
   }
   return Math.max(6, Math.min(18, Math.floor(rows * 0.3)));
+}
+
+// ---------------------------------------------------------------------------
+// Settings pane model: one SettingsList row per config key
+// ---------------------------------------------------------------------------
+
+const ON_OFF = ["on", "off"];
+
+/** The `/panel` pane's rows, in display order, reflecting the live config. */
+export function settingsItems(config: PanelConfig): SettingItem[] {
+  const onOff = (value: boolean) => (value ? "on" : "off");
+  return [
+    {
+      id: "enabled",
+      label: "enabled",
+      description: "Show the panel above the editor. Off removes it and stops its timer.",
+      currentValue: onOff(config.enabled),
+      values: ON_OFF,
+    },
+    {
+      id: "expand",
+      label: "expand",
+      description:
+        "follow lets ctrl+o decide, always keeps the expanded tree, never keeps one line per tool.",
+      currentValue: config.expand,
+      values: ["follow", "always", "never"],
+    },
+    {
+      id: "idleMode",
+      label: "idleMode",
+      description:
+        "What stays on screen once a run settles: the totals row, the finished tree, or nothing.",
+      currentValue: config.idleMode,
+      values: ["glyph", "full", "hidden"],
+    },
+    {
+      id: "maxRows",
+      label: "maxRows",
+      description:
+        "Row budget. auto is 30% of the terminal height, clamped to 6-18; a number is clamped to 1-48.",
+      currentValue:
+        config.maxRows === "auto" ? "auto" : String(config.maxRows),
+      values: ["auto", "6", "8", "12", "18", "24", "36", "48"],
+    },
+    {
+      id: "pastTurns",
+      label: "pastTurns",
+      description:
+        "Completed turns kept on screen while collapsed. Scrolling up over the panel reveals the rest.",
+      currentValue: String(config.pastTurns),
+      values: ["0", "1", "2", "3", "5", "8", "12", "20"],
+    },
+    {
+      id: "showPrompt",
+      label: "showPrompt",
+      description: "Pin the current prompt above the tree.",
+      currentValue: onOff(config.showPrompt),
+      values: ON_OFF,
+    },
+    {
+      id: "showThinking",
+      label: "showThinking",
+      description: "Show the thinking row while a turn is live.",
+      currentValue: onOff(config.showThinking),
+      values: ON_OFF,
+    },
+    {
+      id: "thinkingPreviewChars",
+      label: "thinkingPreviewChars",
+      description: "Width budget of the thinking preview.",
+      currentValue: String(config.thinkingPreviewChars),
+      values: ["30", "40", "60", "80", "120"],
+    },
+    {
+      id: "glyphs",
+      label: "glyphs",
+      description: "Use ascii on terminals without Unicode glyph support.",
+      currentValue: config.glyphs,
+      values: ["unicode", "ascii"],
+    },
+    {
+      id: "animate",
+      label: "animate",
+      description: "Pulse the running glyph. Off freezes it and stops the timer between updates.",
+      currentValue: onOff(config.animate),
+      values: ON_OFF,
+    },
+    {
+      id: "tickMs",
+      label: "tickMs",
+      description: "Refresh cadence while a run is active.",
+      currentValue: String(config.tickMs),
+      values: ["100", "200", "500", "1000"],
+    },
+    {
+      id: "pulseMs",
+      label: "pulseMs",
+      description: "How long the running glyph holds before alternating.",
+      currentValue: String(config.pulseMs),
+      values: ["300", "600", "1000"],
+    },
+    {
+      id: "thinkingMs",
+      label: "thinkingMs",
+      description: "How often the thinking preview advances.",
+      currentValue: String(config.thinkingMs),
+      values: ["250", "500", "1000", "2000"],
+    },
+  ];
+}
+
+/**
+ * Apply one SettingsList value to a config, validating through `parseConfig` so
+ * the pane and the file can never produce a config the renderer rejects.
+ * Unknown ids or invalid values leave the config untouched.
+ */
+export function applySettingValue(
+  id: string,
+  value: string,
+  base: PanelConfig,
+): PanelConfig {
+  const next: Record<string, unknown> = { ...base };
+  switch (id) {
+    case "enabled":
+    case "showPrompt":
+    case "showThinking":
+    case "animate":
+      next[id] = value === "on";
+      break;
+    case "maxRows":
+      next.maxRows = value === "auto" ? "auto" : Number(value);
+      break;
+    case "pastTurns":
+    case "thinkingPreviewChars":
+    case "tickMs":
+    case "pulseMs":
+    case "thinkingMs":
+      next[id] = Number(value);
+      break;
+    case "expand":
+    case "idleMode":
+    case "glyphs":
+      next[id] = value;
+      break;
+    default:
+      return base;
+  }
+  const parsed = parseConfig(next);
+  return parsed.error ? base : parsed.config;
+}
+
+/** Pi's settings-list styling, so the pane matches `/settings` and `/tools`. */
+function settingsListTheme(theme: ThemeLike): SettingsListTheme {
+  return {
+    label: (text, selected) => (selected ? theme.fg("accent", text) : text),
+    value: (text, selected) =>
+      selected ? theme.fg("accent", text) : theme.fg("muted", text),
+    description: (text) => theme.fg("dim", text),
+    cursor: theme.fg("accent", "→ "),
+    hint: (text) => theme.fg("dim", text),
+  };
 }
 
 /** Ellipsize the middle of a path while keeping its basename visible. */
@@ -1349,6 +1517,9 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
 
   function startTimer(): void {
     if (timer !== undefined) return;
+    // `animate: false` freezes the running glyph, so there is nothing for the
+    // interval to do; events still refresh everything the panel shows.
+    if (!config.animate) return;
     timer = setInterval(() => {
       state.now = Date.now();
       state.tick = ((state.tick ?? 0) + 1) % 1_000_000;
@@ -1357,6 +1528,14 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
     }, config.tickMs);
     // Do not keep a test process or a quitting Pi alive just for the pulse.
     (timer as { unref?: () => void }).unref?.();
+  }
+
+  /** Timer state after a config or lifecycle change: on only for a live run. */
+  function reconcileTimer(): void {
+    stopTimer();
+    if (config.enabled && config.animate && state.phase === "running") {
+      startTimer();
+    }
   }
 
   function resetState(): void {
@@ -1620,9 +1799,101 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
 
   function usage(ctx: ExtensionContext): void {
     ctx.ui.notify(
-      "Usage: /panel [on|off|rows <n|auto>|thinking on|off|idle full|glyph|hidden|ascii on|off|expand always|follow|never|reset]",
+      "Usage: /panel [on|off|status|rows <n|auto>|thinking on|off|idle full|glyph|hidden|ascii on|off|expand always|follow|never|reset]",
       "warning",
     );
+  }
+
+  /** Apply `enabled` and reconcile the widget and timer with it. */
+  function setEnabled(enabled: boolean, ctx: ExtensionContext): void {
+    config.enabled = enabled;
+    if (!enabled) {
+      if (mounted) unmount(ctx);
+    } else if (promptSeen) {
+      mount(ctx);
+    }
+    reconcileTimer();
+    scheduleRender();
+  }
+
+  function reportStatus(ctx: ExtensionContext): void {
+    const dot = glyphsFor(config.glyphs).dot;
+    ctx.ui.notify(
+      `prompt-panel: enabled=${config.enabled ? "on" : "off"} ${dot} rows=${describeBudget()} ${dot} expand=${config.expand} ${dot} idle=${config.idleMode} ${dot} ${configPath()}`,
+      "info",
+    );
+  }
+
+  /**
+   * `/panel` with no arguments opens the settings pane. It is Pi's own
+   * `SettingsList`, so the controls are the same as `/settings` and `/tools`:
+   * arrows move, Enter or Space cycles a value in place, PageUp/PageDown page the
+   * list, Esc closes. Every change is written immediately, so there is no save
+   * step and the panel updates behind the pane as you go.
+   */
+  async function openSettings(ctx: ExtensionContext): Promise<void> {
+    if (typeof ctx.ui.custom !== "function") {
+      reportStatus(ctx);
+      return;
+    }
+    await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+      const items = settingsItems(config);
+      const list = new SettingsList(
+        items,
+        Math.min(items.length, 12),
+        settingsListTheme(theme),
+        (id, value) => {
+          const wasEnabled = config.enabled;
+          config = applySettingValue(id, value, config);
+          persist(ctx);
+          if (config.enabled !== wasEnabled) {
+            setEnabled(config.enabled, ctx);
+          } else {
+            // animate and tickMs both shape the interval, so restart it.
+            reconcileTimer();
+          }
+          scheduleRender();
+        },
+        () => done(undefined),
+      );
+      const heading = {
+        render(width: number): string[] {
+          return [
+            truncateToWidth(theme.fg("accent", "  prompt-panel"), width, "", false),
+            truncateToWidth(theme.fg("dim", `  ${configPath()}`), width, "", false),
+            "",
+          ];
+        },
+        invalidate(): void {},
+      };
+      // The list is offset by the heading, and its mouse hit test is local.
+      const headingRows = 3;
+      const container = new Container();
+      container.addChild(heading);
+      container.addChild(list);
+      return {
+        // PageUp/PageDown page the list instead of scrolling the transcript.
+        capturesViewportInput: list.capturesViewportInput,
+        render(width: number): string[] {
+          return container.render(width);
+        },
+        invalidate(): void {
+          container.invalidate();
+        },
+        handleInput(data: string): void {
+          list.handleInput?.(data);
+          tui.requestRender();
+        },
+        handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+          const result = list.handleMouse?.({
+            ...event,
+            y: event.y - headingRows,
+          });
+          if (result) tui.requestRender();
+          return result;
+        },
+      };
+    });
   }
 
   function describeBudget(): string {
@@ -1694,7 +1965,7 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
     if (state.phase !== "running") resetRun();
     state.phase = "running";
     state.now = Date.now();
-    if (config.enabled) startTimer();
+    reconcileTimer();
     scheduleRender();
   });
 
@@ -1942,7 +2213,7 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
   // ---- command ------------------------------------------------------------
 
   pi.registerCommand("panel", {
-    description: "Show or configure the prompt panel",
+    description: "Open the prompt-panel settings, or configure it directly",
     handler: async (args, ctx) => {
       if (ctx.mode !== "tui") return;
       // After a failed write, the in-memory value is the user's latest choice.
@@ -1954,29 +2225,22 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
         .filter(Boolean);
 
       if (words.length === 0) {
-        ctx.ui.notify(
-          `prompt-panel: enabled=${config.enabled ? "on" : "off"} ${glyphsFor(config.glyphs).dot} rows=${describeBudget()} ${glyphsFor(config.glyphs).dot} expand=${config.expand} ${glyphsFor(config.glyphs).dot} idle=${config.idleMode} ${glyphsFor(config.glyphs).dot} ${configPath()}`,
-          "info",
-        );
+        await openSettings(ctx);
         return;
       }
 
       const command = words[0];
+      if (command === "status") {
+        reportStatus(ctx);
+        return;
+      }
       if (command === "on" || command === "off") {
         if (words.length !== 1) {
           usage(ctx);
           return;
         }
-        config.enabled = command === "on";
+        setEnabled(command === "on", ctx);
         persist(ctx);
-        if (!config.enabled) {
-          stopTimer();
-          if (mounted) unmount(ctx);
-        } else if (promptSeen) {
-          mount(ctx);
-          if (state.phase === "running") startTimer();
-        }
-        scheduleRender();
         return;
       }
 
@@ -2062,11 +2326,10 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
         persist(ctx);
         if (config.enabled) {
           if (promptSeen) mount(ctx);
-          if (state.phase === "running") startTimer();
         } else if (mounted) {
           unmount(ctx);
-          stopTimer();
         }
+        reconcileTimer();
         scheduleRender();
         return;
       }
