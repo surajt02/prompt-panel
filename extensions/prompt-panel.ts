@@ -17,6 +17,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 const WIDGET_KEY = "prompt-panel";
 const CONFIG_FILE = "prompt-panel.json";
 const HARD_MAX_ROWS = 48;
+// Retention bound only. Completed turns are tiny one-line records; the visible
+// depth is chosen at render time (pastTurns collapsed, everything expanded).
+const MAX_RETAINED_TURNS = 500;
 
 export type GlyphMode = "unicode" | "ascii";
 
@@ -996,8 +999,13 @@ export function renderPanel(
 
   const body: string[] = [];
   const pastTurns = Array.isArray(state.pastTurns) ? state.pastTurns : [];
-  const visiblePast =
-    config.pastTurns <= 0 ? [] : pastTurns.slice(-config.pastTurns);
+  // `pastTurns` is the collapsed depth. Expanding the panel (ctrl+o, or
+  // `expand: "always"`) reveals every turn still retained in the session.
+  const visiblePast = expanded
+    ? pastTurns
+    : config.pastTurns <= 0
+      ? []
+      : pastTurns.slice(-config.pastTurns);
   for (const past of visiblePast) {
     body.push(formatPastTurn(past, config, theme));
   }
@@ -1266,8 +1274,11 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
   }
 
   function trimPastTurns(): void {
-    const limit = Math.max(0, Math.floor(config.pastTurns));
-    state.pastTurns = limit === 0 ? [] : (state.pastTurns ?? []).slice(-limit);
+    const past = state.pastTurns ?? [];
+    state.pastTurns =
+      past.length > MAX_RETAINED_TURNS
+        ? past.slice(-MAX_RETAINED_TURNS)
+        : past;
   }
 
   function archiveCurrentTurn(): void {

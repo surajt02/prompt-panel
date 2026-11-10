@@ -73,7 +73,7 @@ malformed file produces one error notification and then defaults.
 | --- | --- | --- |
 | `enabled` | `true` | Master switch; off removes the widget and its timer. |
 | `maxRows` | `"auto"` | `"auto"` = 30% of the terminal height, clamped 6–18. A number is clamped 1–48. |
-| `pastTurns` | `2` | How many completed turns stay visible as one-line summaries. |
+| `pastTurns` | `2` | How many completed turns stay visible as one-line summaries while the panel is collapsed. Expanding reveals every turn the session still retains (up to 500). |
 | `showPrompt` | `true` | Show the pinned prompt row. |
 | `showThinking` | `true` | Show the thinking row while a turn is live. |
 | `thinkingPreviewChars` | `60` | Width budget of the thinking preview. |
@@ -81,7 +81,7 @@ malformed file produces one error notification and then defaults.
 | `tickMs` | `200` | Refresh cadence while a run is active. |
 | `pulseMs` | `600` | How long the running glyph holds before alternating. |
 | `thinkingMs` | `500` | How often the thinking preview advances. |
-| `expand` | `"follow"` | `"follow"` = `ctrl+o` decides; `"always"` = always expanded; `"never"` = one line per tool. |
+| `expand` | `"follow"` | `"follow"` = `ctrl+o` decides; `"always"` = always expanded; `"never"` = one line per tool. Expansion also reveals every retained turn. |
 | `idleMode` | `"full"` | What stays on screen once nothing is running: `"full"` = the finished tree; `"glyph"` = one row of run totals (`✓ 5 turns · 13 tools · 54s`); `"hidden"` = nothing. |
 | `glyphs` | `"unicode"` | `"ascii"` for terminals without Unicode glyph support. |
 
@@ -103,9 +103,12 @@ the value still applies for the session and you are warned once.
 
 ## Behaviour
 
-- **Depth.** The tree is the current run. Each completed turn compresses to one line
-  (`✓ turn 3 · 2 tools · 8.4s`), newest at the bottom, capped by `pastTurns`. Turn numbers stay
-  monotonic across prompts and never gap.
+- **Depth.** The live tree is the current run. Each completed turn compresses to one line
+  (`✓ turn 3 · 2 tools · 8.4s`), newest at the bottom. Collapsed, only the newest `pastTurns` are
+  shown; expanding the panel (`ctrl+o`, or `expand: "always"`) reveals every turn the session
+  still retains, so you can read the whole run's shape at once. Turns are retained as compact
+  records (number, tool count, duration) up to 500; turn numbers stay monotonic across prompts
+  and never gap.
 - **Thinking** is a single row that rewrites itself with the tail of the live buffer. It prefers
   the sentence currently in progress, snaps to a word boundary, and advances at most once per
   `thinkingMs` so it does not crawl per token. It disappears when the turn finishes.
@@ -114,8 +117,10 @@ the value still applies for the session and you are warned once.
   summary ellipsizes at the end. Nested calls (`parentToolCallId`) indent one level; parallel
   calls stay in event order.
 - **Expansion** follows `ctrl+o` (Pi's built-in tool expansion) in `follow` mode: arguments up to
-  3 wrapped lines plus a result preview up to 5 lines, errors in the error colour. Expanded output
-  may grow past the row budget but never past 48 lines or 60% of the terminal.
+  3 wrapped lines plus a result preview up to 5 lines, errors in the error colour, and every
+  retained turn instead of the newest `pastTurns`. Expanded output may grow past the row budget
+  but never past 48 lines or 60% of the terminal; beyond that the oldest rows fold into a single
+  `… N earlier` line.
 - **Budget.** Overflow folds the oldest rows into a single `… N earlier` line. Below 60 columns
   the duration column is dropped, below 48 the diffstat, below 40 the live turn collapses to one
   line.
@@ -154,7 +159,8 @@ cannot detect a layout bug.
 
 - No mouse support: rows are display-only. Use `ctrl+o` to expand.
 - No jump-to-block: the Pi extension API has no transcript scroll hook, so a tree row cannot take
-  you to the corresponding conversation block.
+  you to the corresponding conversation block. Each turn is still retained as its own record so a
+  future navigation hook can target it.
 - Expanded detail covers the live turn only; completed turns are one-liners by design.
 - Width handling is delegated to `@earendil-works/pi-tui`, so the effective version is whatever
   Pi maps extension imports to.

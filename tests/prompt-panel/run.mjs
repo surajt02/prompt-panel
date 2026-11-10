@@ -1108,6 +1108,13 @@ const render = (state, config, width) =>
       rows().filter((line) => /turn \d+/.test(line)).length === 2,
       JSON.stringify(rows()),
     );
+    await command.handler("expand always", ctx);
+    check(
+      "run totals: expanding reveals every turn of the run, not just pastTurns",
+      rows().filter((line) => /turn \d+/.test(line)).length === 3,
+      JSON.stringify(rows()),
+    );
+    await command.handler("expand follow", ctx);
     await command.handler("idle glyph", ctx);
 
     await call("input", { source: "interactive", text: "second run" });
@@ -1524,6 +1531,92 @@ for (const glyphs of ["unicode", "ascii"]) {
     "a running tool with an empty partial result renders no result line",
     !lines.some((line) => line.includes('"content":[]')),
     JSON.stringify(lines),
+  );
+}
+
+// --- Turn history ------------------------------------------------------------
+// Completed turns stay retained as one-line records; expanding the panel is
+// what decides how many of them are visible.
+
+{
+  const base = makeState();
+  const sixTurns = Array.from({ length: 6 }, (_, index) => ({
+    number: index + 1,
+    toolCount: index % 3,
+    durationMs: 1000 * (index + 1),
+  }));
+  const state = makeState({
+    pastTurns: sixTurns,
+    currentTurn: { ...base.currentTurn, number: 7, tools: [], thinking: null },
+    queued: [],
+    notices: [],
+  });
+  const view = (config, expanded, terminalRows = 100) =>
+    renderPanel(
+      state,
+      { config, expanded, terminalRows },
+      100,
+      theme,
+    ).map(plain);
+  const turnRows = (rows) =>
+    rows.filter((line) => /^\s+[✓✗●○] turn \d+/.test(line));
+
+  const collapsed = turnRows(view(cfg({ expand: "follow", pastTurns: 2 }), false));
+  check(
+    "collapsed: shows only the pastTurns newest past turns",
+    collapsed.length === 3 &&
+      collapsed.some((line) => line.includes("turn 6")) &&
+      !collapsed.some((line) => line.includes("turn 4")),
+    JSON.stringify(collapsed),
+  );
+  check(
+    "expanded: reveals every retained turn plus the live one",
+    turnRows(view(cfg({ expand: "follow", pastTurns: 2 }), true)).length === 7 &&
+      turnRows(view(cfg({ expand: "follow", pastTurns: 2 }), true)).some((line) =>
+        line.includes("turn 1"),
+      ),
+    JSON.stringify(turnRows(view(cfg({ expand: "follow", pastTurns: 2 }), true))),
+  );
+  check(
+    "expand=always reveals every turn without ctrl+o",
+    turnRows(view(cfg({ pastTurns: 2, expand: "always" }), false)).length === 7,
+  );
+  check(
+    "expand=never keeps the collapsed depth even when ctrl+o is on",
+    turnRows(view(cfg({ pastTurns: 2, expand: "never" }), true)).length === 3,
+  );
+  check(
+    "pastTurns=0 hides past turns collapsed and reveals them expanded",
+    turnRows(view(cfg({ expand: "follow", pastTurns: 0 }), false)).length === 1 &&
+      turnRows(view(cfg({ expand: "follow", pastTurns: 0 }), true)).length === 7,
+  );
+
+  const many = makeState({
+    pastTurns: Array.from({ length: 20 }, (_, index) => ({
+      number: index + 1,
+      toolCount: 1,
+      durationMs: 1000,
+    })),
+    currentTurn: { ...base.currentTurn, number: 21, tools: [], thinking: null },
+    queued: [],
+    notices: [],
+  });
+  const folded = renderPanel(
+    many,
+    {
+      config: cfg({ expand: "follow", pastTurns: 2 }),
+      expanded: true,
+      terminalRows: 24,
+    },
+    100,
+    theme,
+  ).map(plain);
+  check(
+    "expanded: overflow folds the oldest turns and keeps the live turn last",
+    folded.some((line) => /… \d+ earlier/.test(line)) &&
+      folded.length <= 14 &&
+      /turn 21/.test(folded[folded.length - 1] ?? ""),
+    JSON.stringify(folded),
   );
 }
 
