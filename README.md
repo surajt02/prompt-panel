@@ -64,6 +64,7 @@ malformed file produces one error notification and then defaults.
   "pulseMs": 600,
   "thinkingMs": 500,
   "expand": "follow",
+  "idleMode": "full",
   "glyphs": "unicode"
 }
 ```
@@ -81,18 +82,20 @@ malformed file produces one error notification and then defaults.
 | `pulseMs` | `600` | How long the running glyph holds before alternating. |
 | `thinkingMs` | `500` | How often the thinking preview advances. |
 | `expand` | `"follow"` | `"follow"` = `ctrl+o` decides; `"always"` = always expanded; `"never"` = one line per tool. |
+| `idleMode` | `"full"` | What stays on screen once nothing is running: `"full"` = the finished tree; `"glyph"` = one last-turn summary row; `"hidden"` = nothing. |
 | `glyphs` | `"unicode"` | `"ascii"` for terminals without Unicode glyph support. |
 
 ## Commands
 
 | Command | Effect |
 | --- | --- |
-| `/panel` | Report enabled state, row budget, expand mode, and config path. |
+| `/panel` | Report enabled state, row budget, expand mode, idle mode, and config path. |
 | `/panel on` · `off` | Toggle the panel. |
 | `/panel rows <n\|auto>` | Set the row budget. |
 | `/panel thinking on\|off` | Toggle the thinking row. |
 | `/panel ascii on\|off` | Switch glyph set. |
 | `/panel expand always\|follow\|never` | Set the expansion mode. |
+| `/panel idle full\|glyph\|hidden` | Set what the panel keeps while idle. |
 | `/panel reset` | Restore defaults. |
 
 Every change is persisted to the config file. If the file cannot be written (read-only home),
@@ -116,10 +119,15 @@ the value still applies for the session and you are warned once.
 - **Budget.** Overflow folds the oldest rows into a single `… N earlier` line. Below 60 columns
   the duration column is dropped, below 48 the diffstat, below 40 the live turn collapses to one
   line.
-- **Lifecycle.** Hidden until your first prompt. A finished tree stays visible while idle. Esc
-  freezes it with the active rows marked interrupted. A new prompt swaps the prompt line, archives
-  the tree, and clears the live turn. `/new`, `/resume`, `/tree`, and `/reload` reset it; resuming
-  a session replays nothing.
+- **Lifecycle.** Hidden until your first prompt. A finished tree stays visible while idle
+  (`idleMode: "full"`). With `idleMode: "glyph"` a settled run collapses to a single
+  `✓ turn 3 · 2 tools · 8.4s` row, and with `"hidden"` it disappears entirely; both expand back
+  automatically as soon as the next run starts, before its first token. Esc freezes the tree with
+  the active rows marked interrupted (an interrupted panel stays expanded). Idle collapse wins
+  over the `expand` mode: the finished tree is not expanded while idle just because `expand` is
+  `"always"`. A new prompt swaps the
+  prompt line, archives the tree, and clears the live turn. `/new`, `/resume`, `/tree`, and
+  `/reload` reset it; resuming a session replays nothing.
 - **Cost when idle.** Zero. The interval runs only while a run is active and is cleared on settle,
   abort, shutdown, disable, and disposal.
 

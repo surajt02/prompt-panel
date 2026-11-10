@@ -35,10 +35,15 @@ export interface PanelConfig {
   thinkingMs: number;
   /** always = args and results visible; follow = ctrl+o decides; never = one line per tool. */
   expand: ExpandMode;
+  /** full = keep the finished tree while idle; glyph = one summary row; hidden = nothing. */
+  idleMode: IdleMode;
   glyphs: GlyphMode;
 }
 
 export type ExpandMode = "always" | "follow" | "never";
+
+/** What the panel shows once a run has settled and nothing is executing. */
+export type IdleMode = "full" | "glyph" | "hidden";
 
 export const DEFAULT_CONFIG: Readonly<PanelConfig> = Object.freeze({
   enabled: true,
@@ -52,6 +57,7 @@ export const DEFAULT_CONFIG: Readonly<PanelConfig> = Object.freeze({
   pulseMs: 600,
   thinkingMs: 500,
   expand: "follow",
+  idleMode: "full",
   glyphs: "unicode",
 });
 
@@ -284,6 +290,15 @@ export function parseConfig(input: unknown): ParseConfigResult {
       config.expand = value.expand;
     } else errors.push('expand must be "always", "follow", or "never"');
   }
+  if (hasOwn(value, "idleMode")) {
+    if (
+      value.idleMode === "full" ||
+      value.idleMode === "glyph" ||
+      value.idleMode === "hidden"
+    ) {
+      config.idleMode = value.idleMode;
+    } else errors.push('idleMode must be "full", "glyph", or "hidden"');
+  }
   if (hasOwn(value, "glyphs")) {
     if (value.glyphs === "unicode" || value.glyphs === "ascii") {
       config.glyphs = value.glyphs;
@@ -507,6 +522,35 @@ function formatPastTurn(past: PastTurn, config: PanelConfig, theme: ThemeLike): 
     "dim",
     details.join(` ${glyphs.dot} `),
   )}`;
+}
+
+/**
+ * True when a run has settled and nothing is executing, so the panel is allowed
+ * to collapse. `interrupted` is deliberately not idle: an Esc freeze keeps the
+ * interrupted tree visible.
+ */
+function isIdlePanel(state: PanelState): boolean {
+  if (state.phase !== "idle") return false;
+  if ((state.queued ?? []).length > 0) return false;
+  const turn = state.currentTurn;
+  return !turn || turn.completed === true || turn.aborted === true;
+}
+
+/** One-line summary of the last finished turn, or undefined before any turn. */
+function idleSummary(state: PanelState): PastTurn | undefined {
+  const turn = state.currentTurn;
+  if (turn) {
+    return {
+      number: turn.number,
+      toolCount:
+        turn.toolCount ??
+        (Array.isArray(turn.tools) ? turn.tools.length : 0),
+      durationMs: turn.elapsedMs,
+      aborted: turn.aborted === true,
+    };
+  }
+  const past = Array.isArray(state.pastTurns) ? state.pastTurns : [];
+  return past.length > 0 ? past[past.length - 1] : undefined;
 }
 
 function formatTurnHeader(
@@ -873,6 +917,20 @@ export function renderPanel(
 
   const config: PanelConfig = { ...DEFAULT_CONFIG, ...(options?.config ?? {}) };
   const glyphs = glyphsFor(config.glyphs);
+
+  // Idle collapse: one summary row instead of the finished tree, or nothing at
+  // all. Any active phase (primed/running/interrupted) renders the full panel,
+  // so a new run expands on its own without a keypress.
+  if (config.idleMode !== "full" && isIdlePanel(state)) {
+    if (config.idleMode === "hidden") return [];
+    const summary = idleSummary(state);
+    // Nothing to summarize is the same as nothing to show.
+    if (!summary) return [];
+    return [
+      truncateToWidth(formatPastTurn(summary, config, theme), safeWidth, "", false),
+    ];
+  }
+
   const terminalRows =
     options?.terminalRows ?? process.stdout.rows ?? 24;
   const budget = Math.min(
@@ -1241,7 +1299,7 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
 
   function usage(ctx: ExtensionContext): void {
     ctx.ui.notify(
-      "Usage: /panel [on|off|rows <n|auto>|thinking on|off|ascii on|off|expand always|follow|never|reset]",
+      "Usage: /panel [on|off|rows <n|auto>|thinking on|off|idle full|glyph|hidden|ascii on|off|expand always|follow|never|reset]",
       "warning",
     );
   }
@@ -1562,7 +1620,7 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
 
       if (words.length === 0) {
         ctx.ui.notify(
-          `prompt-panel: enabled=${config.enabled ? "on" : "off"} ${glyphsFor(config.glyphs).dot} rows=${describeBudget()} ${glyphsFor(config.glyphs).dot} expand=${config.expand} ${glyphsFor(config.glyphs).dot} ${configPath()}`,
+          `prompt-panel: enabled=${config.enabled ? "on" : "off"} ${glyphsFor(config.glyphs).dot} rows=${describeBudget()} ${glyphsFor(config.glyphs).dot} expand=${config.expand} ${glyphsFor(config.glyphs).dot} idle=${config.idleMode} ${glyphsFor(config.glyphs).dot} ${configPath()}`,
           "info",
         );
         return;
@@ -1625,6 +1683,20 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
           return;
         }
         config.glyphs = words[1] === "on" ? "ascii" : "unicode";
+        persist(ctx);
+        scheduleRender();
+        return;
+      }
+
+      if (command === "idle") {
+        if (
+          words.length !== 2 ||
+          (words[1] !== "full" && words[1] !== "glyph" && words[1] !== "hidden")
+        ) {
+          usage(ctx);
+          return;
+        }
+        config.idleMode = words[1];
         persist(ctx);
         scheduleRender();
         return;

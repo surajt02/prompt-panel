@@ -196,6 +196,7 @@ function describeOverflow(lines, width) {
       thinkingPreviewChars: 20,
       animate: false,
       tickMs: 250,
+      idleMode: "glyph",
       glyphs: "ascii",
     }),
   );
@@ -210,7 +211,16 @@ function describeOverflow(lines, width) {
       result.config.thinkingPreviewChars === 20 &&
       result.config.animate === false &&
       result.config.tickMs === 250 &&
+      result.config.idleMode === "glyph" &&
       result.config.glyphs === "ascii",
+    JSON.stringify(result),
+  );
+}
+{
+  const result = parseConfig({});
+  check(
+    "parseConfig({}): idleMode defaults to full",
+    !result.error && result.config.idleMode === "full",
     JSON.stringify(result),
   );
 }
@@ -221,6 +231,7 @@ for (const [label, value] of [
   ["pastTurns -1", { pastTurns: -1 }],
   ["tickMs 0", { tickMs: 0 }],
   ["glyphs nope", { glyphs: "nope" }],
+  ["idleMode sometimes", { idleMode: "sometimes" }],
   ["enabled string", { enabled: "yes" }],
 ]) {
   const result = parseConfig(value);
@@ -873,6 +884,45 @@ for (const width of [10, 40, 60, 200]) {
       widget.render(80).every((line) => visibleWidth(line) <= 80),
     );
 
+    // Idle collapse: a settled panel shrinks to one row (or nothing) and
+    // expands again on its own as soon as the next run starts.
+    await command.handler("idle glyph", ctx);
+    const collapsed = widget.render(80);
+    check(
+      "lifecycle: idle=glyph collapses a settled run to one summary row",
+      collapsed.length === 1 &&
+        /turn 1/.test(collapsed[0]) &&
+        !collapsed[0].includes("fetch.ts"),
+      JSON.stringify(collapsed),
+    );
+    await call("input", { source: "interactive", text: "third prompt" });
+    check(
+      "lifecycle: a new prompt expands the collapsed panel without a keypress",
+      widget.render(80).length > 1 && widget.render(80).join("\n").includes("third prompt"),
+      JSON.stringify(widget.render(80)),
+    );
+    await call("agent_start", {});
+    await call("agent_settled", { aborted: false });
+    await command.handler("idle hidden", ctx);
+    check(
+      "lifecycle: idle=hidden renders no rows while idle",
+      widget.render(80).length === 0,
+      JSON.stringify(widget.render(80)),
+    );
+    await call("agent_start", {});
+    check(
+      "lifecycle: a running agent expands a hidden panel again",
+      widget.render(80).length > 1,
+      JSON.stringify(widget.render(80)),
+    );
+    await call("agent_settled", { aborted: false });
+    await command.handler("idle full", ctx);
+    check(
+      "lifecycle: idle=full keeps the finished tree",
+      widget.render(80).length > 1,
+      JSON.stringify(widget.render(80)),
+    );
+
     // A second prompt must continue the turn numbering. Past-turn rows survive
     // the new prompt, so restarting the counter renders "turn 3, turn 4, turn 1".
     await call("agent_settled", { aborted: false });
@@ -913,6 +963,7 @@ for (const width of [10, 40, 60, 200]) {
       status.type === "info" &&
         status.message.includes("enabled=on") &&
         status.message.includes("rows=") &&
+        status.message.includes("idle=full") &&
         status.message.includes(join(tempAgent, "prompt-panel.json")),
       JSON.stringify(status),
     );
@@ -1322,6 +1373,136 @@ for (const glyphs of ["unicode", "ascii"]) {
     "a running tool with an empty partial result renders no result line",
     !lines.some((line) => line.includes('"content":[]')),
     JSON.stringify(lines),
+  );
+}
+
+// --- Idle collapse -----------------------------------------------------------
+
+{
+  const base = makeState();
+  const finishedState = (overrides = {}) =>
+    makeState({
+      phase: "idle",
+      currentTurn: {
+        ...base.currentTurn,
+        number: 3,
+        completed: true,
+        elapsedMs: 8400,
+        toolCount: 2,
+        thinking: { ...base.currentTurn.thinking, done: true },
+      },
+      queued: [],
+      notices: [],
+      ...overrides,
+    });
+
+  const full = render(finishedState(), cfg(), 80).map(plain);
+  const glyph = render(finishedState(), cfg({ idleMode: "glyph" }), 80).map(plain);
+  check(
+    "idleMode defaults to the finished tree",
+    full.length > 1 && full.some((line) => line.includes("turn 3")),
+    JSON.stringify(full),
+  );
+  check(
+    "idleMode=glyph collapses a settled run to one summary row",
+    glyph.length === 1 &&
+      /^\s*✓ turn 3 · 2 tools · 8\.4s$/.test(glyph[0]),
+    JSON.stringify(glyph),
+  );
+  check(
+    "idleMode=glyph drops the pinned prompt, thinking row, and tool rows",
+    !glyph[0].includes("refactor the auth") &&
+      !glyph[0].includes("Thinking") &&
+      !glyph[0].includes("fetch.ts") &&
+      !glyph[0].includes("pnpm test"),
+    JSON.stringify(glyph),
+  );
+  check(
+    "idleMode=glyph keeps an interrupted run expanded",
+    render(
+      finishedState({ phase: "interrupted" }),
+      cfg({ idleMode: "glyph" }),
+      80,
+    ).length > 1,
+  );
+  check(
+    "idleMode=glyph marks an aborted run with the cross glyph",
+    plain(
+      render(
+        finishedState({
+          currentTurn: {
+            ...base.currentTurn,
+            number: 4,
+            aborted: true,
+            completed: false,
+            toolCount: 1,
+            elapsedMs: 1200,
+          },
+        }),
+        cfg({ idleMode: "glyph" }),
+        80,
+      )[0] ?? "",
+    ).trim() === "✗ turn 4 · 1 tool · 1.2s",
+  );
+  check(
+    "idleMode=hidden renders nothing while idle",
+    render(finishedState(), cfg({ idleMode: "hidden" }), 80).length === 0,
+  );
+  check(
+    "idleMode=glyph and hidden both render the full tree while a run is live",
+    render(makeState(), cfg({ idleMode: "glyph" }), 80).length > 1 &&
+      render(makeState(), cfg({ idleMode: "hidden" }), 80).length > 1 &&
+      render(makeState(), cfg({ idleMode: "glyph" }), 80).map(plain).some((line) => line.includes("Thinking")),
+  );
+  check(
+    "idleMode=glyph expands while a prompt is primed but no turn has started",
+    render(
+      finishedState({ phase: "primed", currentTurn: null }),
+      cfg({ idleMode: "glyph" }),
+      80,
+    ).map(plain).some((line) => line.includes("refactor the auth")),
+  );
+  check(
+    "idleMode=glyph expands when working output is queued",
+    render(
+      finishedState({ queued: ["also update the docs"] }),
+      cfg({ idleMode: "glyph" }),
+      80,
+    ).map(plain).some((line) => line.includes("queued")),
+  );
+  check(
+    "idleMode=glyph summarises the last past turn when the live turn is gone",
+    render(
+      finishedState({
+        currentTurn: null,
+        pastTurns: [{ number: 7, toolCount: 4, durationMs: 14000 }],
+      }),
+      cfg({ idleMode: "glyph" }),
+      80,
+    ).map(plain).join("\n").includes("turn 7 · 4 tools · 14s"),
+  );
+  check(
+    "idleMode=glyph shows nothing when there is no turn to summarise",
+    render(
+      finishedState({ currentTurn: null, pastTurns: [] }),
+      cfg({ idleMode: "glyph" }),
+      80,
+    ).length === 0,
+  );
+  check(
+    "idleMode=glyph summary fits narrow widths and ascii mode",
+    [20, 24, 30, 60].every((width) => {
+      const lines = render(
+        finishedState(),
+        cfg({ idleMode: "glyph", glyphs: "ascii" }),
+        width,
+      );
+      return (
+        lines.length === 1 &&
+        allLinesFit(lines, width) &&
+        /^[\x00-\x7F]*$/.test(plain(lines[0]))
+      );
+    }),
   );
 }
 
