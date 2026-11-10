@@ -207,6 +207,8 @@ export interface PanelRenderOptions {
 
 interface ThemeLike {
   fg(token: string, text: string): string;
+  /** Optional so a minimal theme (or a test double) still renders plain text. */
+  italic?(text: string): string;
 }
 
 interface Glyphs {
@@ -755,6 +757,21 @@ function paint(theme: ThemeLike, token: string, text: string): string {
   }
 }
 
+/** Italic when the theme offers it; the prompt still reads without it. */
+function italic(theme: ThemeLike, text: string): string {
+  try {
+    return theme.italic ? theme.italic(text) : text;
+  } catch {
+    return text;
+  }
+}
+
+/** The rule above the prompt block, matching the panel and settings pane. */
+function promptRule(config: PanelConfig, width: number, theme: ThemeLike): string {
+  const rule = glyphsFor(config.glyphs).rule;
+  return paint(theme, "border", rule.repeat(Math.max(1, width)));
+}
+
 function pluralTools(count: number): string {
   if (!(count > 0)) return "";
   return `${count} tool${count === 1 ? "" : "s"}`;
@@ -1210,7 +1227,9 @@ function renderPromptRows(
       available,
       glyphs.ellipsis,
     );
-    return [paint(theme, "accent", prefix) + paint(theme, "text", text)];
+    return [
+      paint(theme, "accent", prefix) + paint(theme, "text", italic(theme, text)),
+    ];
   }
 
   // Keep paragraph breaks: a prompt is often a short ask followed by detail.
@@ -1230,7 +1249,7 @@ function renderPromptRows(
   return wrapped.map((text, index) => {
     if (text === "") return "";
     const lead = index === 0 ? paint(theme, "accent", prefix) : indent;
-    return lead + paint(theme, "text", text);
+    return lead + paint(theme, "text", italic(theme, text));
   });
 }
 
@@ -1304,7 +1323,7 @@ export function renderPanel(
   const expandRoom = Math.max(budget, Math.floor(terminalRows * 0.6));
   const cap = expanded ? Math.min(HARD_MAX_ROWS, expandRoom) : budget;
 
-  const promptBlock =
+  const promptRows =
     config.showPrompt && state.prompt
       ? renderPromptRows(
           state.prompt,
@@ -1314,7 +1333,12 @@ export function renderPanel(
           state.promptExpanded === true,
         )
       : [];
-  const content: string[] = [...promptBlock];
+  // The rule belongs to the prompt block: one row of the budget, above the
+  // prompt, and never a click target.
+  const promptTop = promptRows.length > 0 ? 1 : 0;
+  const content: string[] = [];
+  if (promptTop > 0) content.push(promptRule(config, safeWidth, theme));
+  content.push(...promptRows);
   const pastTurns = Array.isArray(state.pastTurns) ? state.pastTurns : [];
   // The mode sets the depth: `expanded` shows every retained turn, the other
   // modes keep their fold. Scrolling never changes that.
@@ -1383,14 +1407,15 @@ export function renderPanel(
     );
   }
 
-  // Prompt block range within the window, excluding the scroll markers.
-  const promptVisibleEnd = Math.min(promptBlock.length - start, windowRows.length);
-  let promptStart = 0;
-  let promptEnd = Math.max(0, promptVisibleEnd);
-  if (start > 0 && promptEnd > 0) promptStart = 1;
-  if (below > 0 && promptEnd > promptStart) {
-    promptEnd = Math.min(promptEnd, windowRows.length - 1);
-  }
+  // Prompt rows within the window: the rule above them and the scroll markers
+  // at the window's edges are not click targets.
+  let promptStart = Math.max(0, promptTop - start);
+  let promptEnd = Math.min(
+    windowRows.length,
+    promptTop + promptRows.length - start,
+  );
+  if (start > 0) promptStart = Math.max(promptStart, 1);
+  if (below > 0) promptEnd = Math.min(promptEnd, windowRows.length - 1);
   if (promptEnd <= promptStart) {
     promptStart = 0;
     promptEnd = 0;

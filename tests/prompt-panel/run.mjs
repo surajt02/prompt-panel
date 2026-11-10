@@ -75,6 +75,7 @@ const TOKEN_CODES = {
   toolTitle: 38,
   toolOutput: 39,
   thinkingText: 40,
+  border: 41,
 };
 const ansi = (token) => `\x1b[${TOKEN_CODES[token] ?? 0}m`;
 const theme = {
@@ -1620,25 +1621,23 @@ for (const glyphs of ["unicode", "ascii"]) {
   const scrolledView = (scroll) =>
     renderPanel(
       { ...state, scroll },
-      { config: cfg({ display: "compact", maxRows: 2 }), terminalRows: 24 },
+      { config: cfg({ display: "compact", maxRows: 4 }), terminalRows: 24 },
       100,
       theme,
     ).map(plain);
   check(
     "scroll: moving the window never changes the panel's row count",
-    scrolledView(0).length === 2 &&
-      scrolledView(1).length === 2 &&
-      scrolledView(2).length === 2,
-    JSON.stringify({ top: scrolledView(2), middle: scrolledView(1), tail: scrolledView(0) }),
+    [0, 1, 2, 9].every((scroll) => scrolledView(scroll).length === 4),
+    JSON.stringify({ top: scrolledView(9), tail: scrolledView(0) }),
   );
   check(
     "scroll: moving the window swaps rows but reveals no dropped turn",
     scrolledView(0).some((line) => line.includes("turn 7")) &&
-      scrolledView(2).some((line) => line.includes("refactor the auth")) &&
-      [0, 1, 2].every(
+      scrolledView(9).some((line) => line.includes("refactor the auth")) &&
+      [0, 1, 2, 9].every(
         (scroll) => !scrolledView(scroll).some((line) => line.includes("turn 1")),
       ),
-    JSON.stringify({ top: scrolledView(2), tail: scrolledView(0) }),
+    JSON.stringify({ top: scrolledView(9), tail: scrolledView(0) }),
   );
   check(
     "scroll: an idle totals row is a click target, not a scroll target",
@@ -1725,9 +1724,10 @@ for (const glyphs of ["unicode", "ascii"]) {
     queued: [],
     notices: [],
   });
+  // Row 0 is the rule above the prompt block.
   const row = (prompt, width = 60, overrides = {}) =>
     plain(
-      render({ ...base, prompt }, cfg({ display: "minimal", ...overrides }), width)[0] ??
+      render({ ...base, prompt }, cfg({ display: "minimal", ...overrides }), width)[1] ??
         "",
     );
   const bodyOf = (line) => line.replace(/^[>❯] /, "").replace(/(…|\.\.\.)$/, "");
@@ -1789,6 +1789,81 @@ for (const glyphs of ["unicode", "ascii"]) {
   );
 }
 
+// --- Prompt styling ----------------------------------------------------------
+// The prompt is italic with a border rule above it, so it reads as the pinned
+// ask rather than as another block of model output.
+
+{
+  const base = makeState({
+    prompt: "refactor the auth middleware",
+    currentTurn: null,
+    pastTurns: [],
+    queued: [],
+    notices: [],
+    promptExpanded: false,
+  });
+  const view = (state, config, width = 60, activeTheme = theme) =>
+    renderPanel(state, { config, terminalRows: 24 }, width, activeTheme);
+  const italicTheme = {
+    fg: theme.fg,
+    italic: (text) => `\x1b[3m${text}\x1b[0m`,
+  };
+  const minimal = cfg({ display: "minimal" });
+
+  const styled = view(base, minimal, 60, italicTheme);
+  check(
+    "style: the prompt body is italic when the theme supports it",
+    styled[1].includes("\x1b[3m") && plain(styled[1]).startsWith("❯ refactor"),
+    JSON.stringify(styled.map(plain)),
+  );
+  check(
+    "style: a theme without italics still renders the prompt",
+    !view(base, minimal)[1].includes("\x1b[3m") &&
+      plain(view(base, minimal)[1]).startsWith("❯ refactor"),
+  );
+  check(
+    "style: an expanded prompt is italic on every wrapped line",
+    view({ ...base, promptExpanded: true }, minimal, 60, italicTheme)
+      .slice(1)
+      .every((line) => line === "" || line.includes("\x1b[3m")),
+  );
+  check(
+    "style: a border rule sits above the prompt and spans the width",
+    (() => {
+      const lines = view(base, minimal);
+      const rule = plain(lines[0]);
+      return (
+        /^─+$/.test(rule) &&
+        visibleWidth(rule) === 60 &&
+        lines[0].includes(ansi("border")) &&
+        plain(lines[1]).startsWith("❯ ")
+      );
+    })(),
+    JSON.stringify(view(base, minimal).map(plain)),
+  );
+  check(
+    "style: the rule follows ascii glyph mode",
+    /^-+$/.test(plain(view(base, cfg({ display: "minimal", glyphs: "ascii" }))[0])),
+  );
+  check(
+    "style: no rule when there is no prompt to separate",
+    view({ ...base, prompt: "" }, minimal).length === 0 &&
+      view(base, cfg({ display: "minimal", showPrompt: false })).length === 0,
+  );
+  check(
+    "style: the idle totals row has no rule",
+    view(
+      {
+        ...base,
+        phase: "idle",
+        currentTurn: null,
+        run: { turns: 2, tools: 3, durationMs: 4000 },
+      },
+      minimal,
+    ).length === 1,
+  );
+}
+
 // --- Prompt expansion ---------------------------------------------------------
 // Clicking the prompt block expands the full text in place; the renderer is
 // pure, so `promptExpanded` is plain state.
@@ -1808,10 +1883,11 @@ for (const glyphs of ["unicode", "ascii"]) {
 
   const collapsed = render(base, cfg({ display: "minimal" }), 60).map(plain);
   check(
-    "prompt: collapsed shows one ellipsized row",
-    collapsed.length === 1 &&
-      collapsed[0].startsWith("❯ ") &&
-      collapsed[0].endsWith("…"),
+    "prompt: a rule sits above one ellipsized row",
+    collapsed.length === 2 &&
+      /^─+$/.test(collapsed[0]) &&
+      collapsed[1].startsWith("❯ ") &&
+      collapsed[1].endsWith("…"),
     JSON.stringify(collapsed),
   );
 
@@ -1831,9 +1907,10 @@ for (const glyphs of ["unicode", "ascii"]) {
   const expanded = expandedLines.map(plain);
   check(
     "prompt: expanded wraps the full text in place",
-    expanded.length > 1 &&
-      expanded[0].startsWith("❯ ") &&
-      expanded.every((line, index) => index === 0 || line.startsWith("  ")) &&
+    expanded.length > 2 &&
+      /^─+$/.test(expanded[0]) &&
+      expanded[1].startsWith("❯ ") &&
+      expanded.slice(2).every((line) => line === "" || line.startsWith("  ")) &&
       expanded.join(" ").replace(/\s+/g, " ").includes("add a migration note"),
     JSON.stringify(expanded),
   );
@@ -1842,8 +1919,8 @@ for (const glyphs of ["unicode", "ascii"]) {
     expandedLines.every((line) => visibleWidth(line) <= 60),
   );
   check(
-    "prompt: onLayout reports the prompt rows as the click target",
-    promptLayout.promptStart === 0 &&
+    "prompt: onLayout reports the prompt rows as the click target, not the rule",
+    promptLayout.promptStart === 1 &&
       promptLayout.promptEnd === expanded.length &&
       promptLayout.maxScrollOffset === 0,
     JSON.stringify(promptLayout),
@@ -1899,11 +1976,12 @@ for (const glyphs of ["unicode", "ascii"]) {
   );
   const top = hugeView(Number.POSITIVE_INFINITY);
   check(
-    "scroll: scrolling to the top starts at the prompt's first line",
-    top.lines[0].startsWith("❯ word") &&
+    "scroll: scrolling to the top starts at the prompt's first line, under its rule",
+    /^─+$/.test(top.lines[0]) &&
+      top.lines[1].startsWith("❯ word") &&
       /^\s*… \d+ more$/.test(top.lines[4]) &&
       top.layout.scrollOffset === top.layout.maxScrollOffset &&
-      top.layout.promptStart === 0 &&
+      top.layout.promptStart === 1 &&
       top.layout.promptEnd === 4,
     JSON.stringify(top),
   );
@@ -1919,13 +1997,13 @@ for (const glyphs of ["unicode", "ascii"]) {
   check(
     "scroll: an offset past the end clamps to the top",
     clamped.layout.scrollOffset === clamped.layout.maxScrollOffset &&
-      clamped.lines[0].startsWith("❯ word"),
+      clamped.lines[1].startsWith("❯ word"),
     JSON.stringify(clamped.layout),
   );
 
   check(
     "prompt: a new prompt renders collapsed by default",
-    render(base, cfg({ display: "minimal" }), 60).length === 1,
+    render(base, cfg({ display: "minimal" }), 60).length === 2,
   );
 
   let idleLayout;
@@ -1992,46 +2070,53 @@ for (const glyphs of ["unicode", "ascii"]) {
     call("session_start", { reason: "startup" });
     call("input", { source: "interactive", text: longPrompt });
     check(
-      "click: before any click the prompt is one truncated row",
-      rows().length === 1 && rows()[0].endsWith("…"),
+      "click: the rule sits above one truncated prompt row",
+      rows().length === 2 &&
+        /^─+$/.test(rows()[0]) &&
+        rows()[1].endsWith("…"),
       JSON.stringify(rows()),
     );
 
     check(
       "click: a right-click on the prompt does nothing",
-      click(0, "right") === undefined && rows().length === 1,
+      click(1, "right") === undefined && rows().length === 2,
+    );
+    check(
+      "click: a click on the rule does nothing",
+      click(0) === undefined && rows().length === 2,
+      JSON.stringify(rows()),
     );
     check(
       "click: a click below the prompt row does nothing",
-      click(1) === undefined && rows().length === 1,
+      click(2) === undefined && rows().length === 2,
     );
 
     check(
       "click: a click on the prompt expands it in place",
-      click(0) !== undefined &&
-        rows().length > 1 &&
+      click(1) !== undefined &&
+        rows().length > 2 &&
         rows().join(" ").includes("add a migration note"),
       JSON.stringify(rows()),
     );
     const expandedRows = rows().length;
     check(
       "click: clicking the last prompt row collapses it again",
-      click(expandedRows - 1) !== undefined && rows().length === 1,
+      click(expandedRows - 1) !== undefined && rows().length === 2,
       JSON.stringify(rows()),
     );
 
-    click(0);
+    click(1);
     call("input", { source: "interactive", text: longPrompt });
     check(
       "click: a new prompt starts collapsed",
-      rows().length === 1,
+      rows().length === 2,
       JSON.stringify(rows()),
     );
 
     check(
       "click: a press in the prompt block is claimed, not a selection",
       JSON.stringify(
-        widget.handleMouse({ type: "press", button: "left", y: 0 }),
+        widget.handleMouse({ type: "press", button: "left", y: 1 }),
       ) === JSON.stringify({ handled: true, render: false }),
     );
 
@@ -2051,7 +2136,7 @@ for (const glyphs of ["unicode", "ascii"]) {
   process.env.PI_CODING_AGENT_DIR = tempAgent;
   writeFileSync(
     join(tempAgent, "prompt-panel.json"),
-    JSON.stringify({ maxRows: 2 }),
+    JSON.stringify({ maxRows: 3 }),
   );
   try {
     const longPrompt =
@@ -2092,16 +2177,20 @@ for (const glyphs of ["unicode", "ascii"]) {
     call("input", { source: "interactive", text: longPrompt });
     check(
       "scroll: the wheel stays on a panel that fits instead of scrolling the transcript",
-      wheel(-1) !== undefined && wheel(1) !== undefined && rows().length === 1,
+      wheel(-1) !== undefined &&
+        wheel(1) !== undefined &&
+        rows().length === 2 &&
+        /^─+$/.test(rows()[0]),
     );
 
-    click(0);
+    click(1);
     const top = rows();
     check(
-      "scroll: expanding a long prompt opens at its first line",
-      top.length === 2 &&
-        top[0].startsWith("❯ refactor") &&
-        /… \d+ more$/.test(top[1]),
+      "scroll: expanding a long prompt opens at its first line, under its rule",
+      top.length === 3 &&
+        /^─+$/.test(top[0]) &&
+        top[1].startsWith("❯ refactor") &&
+        /… \d+ more$/.test(top[2]),
       JSON.stringify(top),
     );
 
@@ -2113,7 +2202,7 @@ for (const glyphs of ["unicode", "ascii"]) {
 
     check(
       "scroll: at the tail the wheel still reports handled",
-      wheel(1) !== undefined && !/… \d+ more$/.test(rows()[1]),
+      wheel(1) !== undefined && !/… \d+ more$/.test(rows()[2]),
       JSON.stringify(rows()),
     );
 
@@ -2125,16 +2214,16 @@ for (const glyphs of ["unicode", "ascii"]) {
 
     check(
       "scroll: a click on a visible prompt row collapses it",
-      click(1) !== undefined && rows().length === 1,
+      click(1) !== undefined && rows().length === 2,
       JSON.stringify(rows()),
     );
 
-    click(0);
+    click(1);
     wheel(-1);
     call("input", { source: "interactive", text: longPrompt });
     check(
       "scroll: a new prompt resets the offset",
-      rows().length === 1 && wheel(-1) !== undefined,
+      rows().length === 2 && wheel(-1) !== undefined,
       JSON.stringify(rows()),
     );
 
@@ -2294,8 +2383,8 @@ for (const glyphs of ["unicode", "ascii"]) {
     check(
       "click: a new prompt starts folded, with no history above the live turn",
       turnNumbers() === "" &&
-        rows().length === 1 &&
-        rows()[0].includes("a second ask"),
+        rows().length === 2 &&
+        rows()[1].includes("a second ask"),
       JSON.stringify(rows()),
     );
 
