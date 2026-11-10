@@ -160,6 +160,10 @@ directly, so it needs no TUI, no session, and no network. It asserts rendered **
 line widths — the panel clips every line as a safety net, which means a width-only assertion
 cannot detect a layout bug.
 
+`docs/` holds no code: `upstream-reveal-entry.md` is the argument for the one Pi API this
+extension is waiting on, kept in the repo so the evidence stays checkable against the Pi version
+it was verified against.
+
 ## Limitations
 
 - Mouse: the prompt block is clickable and the panel scrolls under the wheel. Other rows are
@@ -167,8 +171,13 @@ cannot detect a layout bug.
   (`tuiMode: "fullscreen"`, the default) — regular mode leaves mouse reporting to the terminal,
   so no mouse events reach extensions there.
 - No jump-to-block: the Pi extension API has no transcript scroll hook, so a tree row cannot take
-  you to the corresponding conversation block. Each turn is still retained as its own record so a
-  future navigation hook can target it.
+  you to the corresponding conversation block, and the panel cannot build one on its own — the
+  transcript handle, and the entry-to-row map, are private. Turns are retained as compact records
+  (`number`, tool count, duration, aborted) and do not yet carry the session entry id that a reveal
+  hook would target. The intended shape — click a turn's header row, land on that turn, no
+  keyboard binding — plus the verified evidence and prior art are written up in
+  [`docs/upstream-reveal-entry.md`](docs/upstream-reveal-entry.md), which is the request to file
+  upstream.
 - Expanded detail covers the live turn only; completed turns are one-liners by design.
 - Width handling is delegated to `@earendil-works/pi-tui`, so the effective version is whatever
   Pi maps extension imports to.
