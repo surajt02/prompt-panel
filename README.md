@@ -82,7 +82,7 @@ malformed file produces one error notification and then defaults.
 | `pulseMs` | `600` | How long the running glyph holds before alternating. |
 | `thinkingMs` | `500` | How often the thinking preview advances. |
 | `expand` | `"follow"` | `"follow"` = `ctrl+o` decides; `"always"` = always expanded; `"never"` = one line per tool. |
-| `idleMode` | `"full"` | What stays on screen once nothing is running: `"full"` = the finished tree; `"glyph"` = one last-turn summary row; `"hidden"` = nothing. |
+| `idleMode` | `"full"` | What stays on screen once nothing is running: `"full"` = the finished tree; `"glyph"` = one row of run totals (`✓ 5 turns · 13 tools · 54s`); `"hidden"` = nothing. |
 | `glyphs` | `"unicode"` | `"ascii"` for terminals without Unicode glyph support. |
 
 ## Commands
@@ -120,14 +120,14 @@ the value still applies for the session and you are warned once.
   the duration column is dropped, below 48 the diffstat, below 40 the live turn collapses to one
   line.
 - **Lifecycle.** Hidden until your first prompt. A finished tree stays visible while idle
-  (`idleMode: "full"`). With `idleMode: "glyph"` a settled run collapses to a single
-  `✓ turn 3 · 2 tools · 8.4s` row, and with `"hidden"` it disappears entirely; both expand back
-  automatically as soon as the next run starts, before its first token. Esc freezes the tree with
-  the active rows marked interrupted (an interrupted panel stays expanded). Idle collapse wins
-  over the `expand` mode: the finished tree is not expanded while idle just because `expand` is
-  `"always"`. A new prompt swaps the
-  prompt line, archives the tree, and clears the live turn. `/new`, `/resume`, `/tree`, and
-  `/reload` reset it; resuming a session replays nothing.
+  (`idleMode: "full"`). With `idleMode: "glyph"` a settled run collapses to one row of totals —
+  `✓ 5 turns · 13 tools · 54s` — summed over every turn of that run, including turns that
+  `pastTurns` no longer keeps on screen, and with `"hidden"` it disappears entirely; both expand
+  back automatically as soon as the next run starts, before its first token. Esc freezes the tree
+  with the active rows marked interrupted (an interrupted panel stays expanded). Idle collapse
+  wins over the `expand` mode: the finished tree is not expanded while idle just because `expand`
+  is `"always"`. A new prompt swaps the prompt line, archives the tree, and clears the live turn.
+  `/new`, `/resume`, `/tree`, and `/reload` reset it; resuming a session replays nothing.
 - **Cost when idle.** Zero. The interval runs only while a run is active and is cleared on settle,
   abort, shutdown, disable, and disposal.
 

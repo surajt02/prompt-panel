@@ -891,7 +891,7 @@ for (const width of [10, 40, 60, 200]) {
     check(
       "lifecycle: idle=glyph collapses a settled run to one summary row",
       collapsed.length === 1 &&
-        /turn 1/.test(collapsed[0]) &&
+        /1 turn · 1 tool/.test(collapsed[0]) &&
         !collapsed[0].includes("fetch.ts"),
       JSON.stringify(collapsed),
     );
@@ -1018,6 +1018,157 @@ const plain = (line) => line.replace(/\x1b\[[0-9;]*m/g, "");
 const cfg = (overrides = {}) => ({ ...COLLAPSED, ...overrides });
 const render = (state, config, width) =>
   renderPanel(state, { config, expanded: false, terminalRows: 24 }, width, theme);
+
+// --- Run totals --------------------------------------------------------------
+// The collapsed row sums every turn of a run, not just the retained past turns.
+
+{
+  const tempAgent = mkdtempSync(join(here, ".tmp-agent-run-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const realNow = Date.now;
+  let clock = 1_000_000;
+  process.env.PI_CODING_AGENT_DIR = tempAgent;
+  Date.now = () => clock;
+  try {
+    // pastTurns=1 so a 3-turn run outruns what the panel still retains.
+    writeFileSync(
+      join(tempAgent, "prompt-panel.json"),
+      JSON.stringify({ pastTurns: 1, idleMode: "glyph" }),
+    );
+    const handlers = new Map();
+    let command;
+    let widget;
+    mod.default({
+      on(name, handler) {
+        handlers.set(name, handler);
+      },
+      registerCommand(name, options) {
+        if (name === "panel") command = options;
+      },
+    });
+    const tui = { terminal: { rows: 24 }, requestRender() {} };
+    const ctx = {
+      mode: "tui",
+      ui: {
+        notify() {},
+        setWidget(_key, content) {
+          widget =
+            typeof content === "function" ? content(tui, theme) : content;
+        },
+        getToolsExpanded() {
+          return false;
+        },
+      },
+    };
+    const call = (name, event = {}) => handlers.get(name)?.(event, ctx);
+    const rows = () => widget.render(80).map(plain);
+    const glyph = () => rows()[0] ?? "";
+    const runTool = async (id, name, args = {}, result = "ok") => {
+      await call("tool_execution_start", {
+        toolCallId: id,
+        toolName: name,
+        args,
+      });
+      await call("tool_execution_end", {
+        toolCallId: id,
+        toolName: name,
+        result,
+        isError: false,
+      });
+    };
+
+    await call("session_start", { reason: "startup" });
+    await call("input", { source: "interactive", text: "three turns" });
+    await call("agent_start", {});
+
+    await call("turn_start", {});
+    await runTool("a", "read", { path: "a.ts" });
+    clock += 2000;
+    await call("turn_end", {});
+
+    await call("turn_start", {});
+    await runTool("b", "bash", { command: "one" });
+    clock += 3000;
+    await runTool("c", "bash", { command: "two" });
+    await call("turn_end", {});
+
+    await call("turn_start", {});
+    clock += 1000;
+    await call("turn_end", {});
+
+    await call("agent_settled", { aborted: false });
+    check(
+      "run totals: sums turns, tools, and elapsed time beyond the pastTurns cap",
+      glyph().trim() === "✓ 3 turns · 3 tools · 6.0s",
+      glyph(),
+    );
+    await command.handler("idle full", ctx);
+    check(
+      "run totals: the full panel still shows only the retained past turn",
+      rows().filter((line) => /turn \d+/.test(line)).length === 2,
+      JSON.stringify(rows()),
+    );
+    await command.handler("idle glyph", ctx);
+
+    await call("input", { source: "interactive", text: "second run" });
+    await call("agent_start", {});
+    await call("turn_start", {});
+    clock += 2500;
+    await call("turn_end", {});
+    await call("agent_settled", { aborted: false });
+    check(
+      "run totals: a new prompt starts a fresh total",
+      glyph().trim() === "✓ 1 turn · 2.5s",
+      glyph(),
+    );
+
+    // A retry re-enters agent_start before settling; totals keep accumulating.
+    await call("input", { source: "interactive", text: "retried run" });
+    await call("agent_start", {});
+    await call("turn_start", {});
+    await runTool("d", "read", { path: "d.ts" });
+    clock += 1000;
+    await call("turn_end", {});
+    await call("agent_end", {});
+    await call("agent_start", {});
+    await call("turn_start", {});
+    await runTool("e", "read", { path: "e.ts" });
+    clock += 1500;
+    await call("turn_end", {});
+    await call("agent_settled", { aborted: false });
+    check(
+      "run totals: a retry keeps accumulating instead of resetting",
+      glyph().trim() === "✓ 2 turns · 2 tools · 2.5s",
+      glyph(),
+    );
+
+    // Abort mid-turn: no turn_end, but the unfinished turn still counts.
+    await call("input", { source: "interactive", text: "aborted run" });
+    await call("agent_start", {});
+    await call("turn_start", {});
+    await call("tool_execution_start", {
+      toolCallId: "f",
+      toolName: "bash",
+      args: { command: "sleep 60" },
+    });
+    clock += 1200;
+    await call("agent_settled", { aborted: true });
+    check(
+      "run totals: an aborted run stays expanded and marks its live turn",
+      rows().length > 1 &&
+        rows().some((line) => /✗ turn 7/.test(line)) &&
+        rows().some((line) => line.includes("sleep 60")),
+      JSON.stringify(rows()),
+    );
+
+    await call("session_shutdown", { reason: "quit" });
+  } finally {
+    Date.now = realNow;
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(tempAgent, { recursive: true, force: true });
+  }
+}
 
 for (const glyphs of ["unicode", "ascii"]) {
   const ellipsis = glyphs === "ascii" ? "..." : "\u2026";
@@ -1404,9 +1555,8 @@ for (const glyphs of ["unicode", "ascii"]) {
     JSON.stringify(full),
   );
   check(
-    "idleMode=glyph collapses a settled run to one summary row",
-    glyph.length === 1 &&
-      /^\s*✓ turn 3 · 2 tools · 8\.4s$/.test(glyph[0]),
+    "idleMode=glyph sums the retained turns when no run record is present",
+    glyph.length === 1 && /^\s*✓ 2 turns · 5 tools · 17s$/.test(glyph[0]),
     JSON.stringify(glyph),
   );
   check(
@@ -1416,6 +1566,39 @@ for (const glyphs of ["unicode", "ascii"]) {
       !glyph[0].includes("fetch.ts") &&
       !glyph[0].includes("pnpm test"),
     JSON.stringify(glyph),
+  );
+  check(
+    "idleMode=glyph shows run totals: turns, tools, and summed time",
+    plain(
+      render(
+        finishedState({
+          run: { turns: 5, tools: 13, durationMs: 54000 },
+          pastTurns: [{ number: 4, toolCount: 2, durationMs: 1000 }],
+        }),
+        cfg({ idleMode: "glyph" }),
+        80,
+      )[0] ?? "",
+    ).trim() === "✓ 5 turns · 13 tools · 54s",
+  );
+  check(
+    "idleMode=glyph uses singular nouns for a one-turn, one-tool run",
+    plain(
+      render(
+        finishedState({ run: { turns: 1, tools: 1, durationMs: 8400 } }),
+        cfg({ idleMode: "glyph" }),
+        80,
+      )[0] ?? "",
+    ).trim() === "✓ 1 turn · 1 tool · 8.4s",
+  );
+  check(
+    "idleMode=glyph omits the tool count when the run called no tools",
+    plain(
+      render(
+        finishedState({ run: { turns: 1, tools: 0, durationMs: 1200 } }),
+        cfg({ idleMode: "glyph" }),
+        80,
+      )[0] ?? "",
+    ).trim() === "✓ 1 turn · 1.2s",
   );
   check(
     "idleMode=glyph keeps an interrupted run expanded",
@@ -1430,19 +1613,12 @@ for (const glyphs of ["unicode", "ascii"]) {
     plain(
       render(
         finishedState({
-          currentTurn: {
-            ...base.currentTurn,
-            number: 4,
-            aborted: true,
-            completed: false,
-            toolCount: 1,
-            elapsedMs: 1200,
-          },
+          run: { turns: 3, tools: 4, durationMs: 9000, aborted: true },
         }),
         cfg({ idleMode: "glyph" }),
         80,
       )[0] ?? "",
-    ).trim() === "✗ turn 4 · 1 tool · 1.2s",
+    ).trim() === "✗ 3 turns · 4 tools · 9.0s",
   );
   check(
     "idleMode=hidden renders nothing while idle",
@@ -1471,7 +1647,7 @@ for (const glyphs of ["unicode", "ascii"]) {
     ).map(plain).some((line) => line.includes("queued")),
   );
   check(
-    "idleMode=glyph summarises the last past turn when the live turn is gone",
+    "idleMode=glyph derives totals from the past turns when the live turn is gone",
     render(
       finishedState({
         currentTurn: null,
@@ -1479,12 +1655,16 @@ for (const glyphs of ["unicode", "ascii"]) {
       }),
       cfg({ idleMode: "glyph" }),
       80,
-    ).map(plain).join("\n").includes("turn 7 · 4 tools · 14s"),
+    ).map(plain).join("\n").includes("1 turn · 4 tools · 14s"),
   );
   check(
-    "idleMode=glyph shows nothing when there is no turn to summarise",
+    "idleMode=glyph shows nothing when the run made no turns",
     render(
-      finishedState({ currentTurn: null, pastTurns: [] }),
+      finishedState({
+        currentTurn: null,
+        pastTurns: [],
+        run: { turns: 0, tools: 0, durationMs: 0 },
+      }),
       cfg({ idleMode: "glyph" }),
       80,
     ).length === 0,

@@ -113,11 +113,21 @@ export interface PastTurn {
   aborted?: boolean;
 }
 
+/** Accumulated totals for one agent run, summed across every turn it produced. */
+export interface RunRecord {
+  turns: number;
+  tools: number;
+  durationMs: number;
+  aborted?: boolean;
+}
+
 export interface PanelState {
   phase?: "hidden" | "primed" | "running" | "idle" | "interrupted";
   prompt?: string;
   pastTurns?: PastTurn[];
   currentTurn?: TurnRecord | null;
+  /** Totals of the run in progress or just finished; authoritative when present. */
+  run?: RunRecord | null;
   queued?: string[];
   notices?: string[];
   tick?: number;
@@ -524,6 +534,56 @@ function formatPastTurn(past: PastTurn, config: PanelConfig, theme: ThemeLike): 
   )}`;
 }
 
+/** One line of run totals for the collapsed row: `✓ 5 turns · 13 tools · 54s`. */
+function formatRunRow(
+  run: RunRecord,
+  config: PanelConfig,
+  theme: ThemeLike,
+): string {
+  const glyphs = glyphsFor(config.glyphs);
+  const mark = run.aborted ? glyphs.cross : glyphs.check;
+  const token = run.aborted ? "error" : "success";
+  const details = [`${run.turns} turn${run.turns === 1 ? "" : "s"}`];
+  const tools = pluralTools(run.tools);
+  if (tools !== "") details.push(tools);
+  if (run.durationMs > 0) details.push(formatDuration(run.durationMs));
+  return `  ${paint(theme, token, mark)} ${paint(
+    theme,
+    "dim",
+    details.join(` ${glyphs.dot} `),
+  )}`;
+}
+
+/**
+ * Run totals for the collapsed row. The runtime keeps an authoritative `run`
+ * record because `pastTurns` is capped; states built without one (tests,
+ * replays) fall back to the turns still retained.
+ */
+function runTotals(state: PanelState): RunRecord {
+  const run = state.run;
+  if (run && typeof run.turns === "number") return run;
+
+  const totals: RunRecord = { turns: 0, tools: 0, durationMs: 0 };
+  for (const past of Array.isArray(state.pastTurns) ? state.pastTurns : []) {
+    totals.turns += 1;
+    totals.tools += past.toolCount;
+    if (typeof past.durationMs === "number") {
+      totals.durationMs += past.durationMs;
+    }
+    if (past.aborted) totals.aborted = true;
+  }
+  const turn = state.currentTurn;
+  if (turn) {
+    totals.turns += 1;
+    totals.tools += turn.toolCount ?? (Array.isArray(turn.tools) ? turn.tools.length : 0);
+    if (typeof turn.elapsedMs === "number") {
+      totals.durationMs += turn.elapsedMs;
+    }
+    if (turn.aborted) totals.aborted = true;
+  }
+  return totals;
+}
+
 /**
  * True when a run has settled and nothing is executing, so the panel is allowed
  * to collapse. `interrupted` is deliberately not idle: an Esc freeze keeps the
@@ -534,23 +594,6 @@ function isIdlePanel(state: PanelState): boolean {
   if ((state.queued ?? []).length > 0) return false;
   const turn = state.currentTurn;
   return !turn || turn.completed === true || turn.aborted === true;
-}
-
-/** One-line summary of the last finished turn, or undefined before any turn. */
-function idleSummary(state: PanelState): PastTurn | undefined {
-  const turn = state.currentTurn;
-  if (turn) {
-    return {
-      number: turn.number,
-      toolCount:
-        turn.toolCount ??
-        (Array.isArray(turn.tools) ? turn.tools.length : 0),
-      durationMs: turn.elapsedMs,
-      aborted: turn.aborted === true,
-    };
-  }
-  const past = Array.isArray(state.pastTurns) ? state.pastTurns : [];
-  return past.length > 0 ? past[past.length - 1] : undefined;
 }
 
 function formatTurnHeader(
@@ -923,12 +966,10 @@ export function renderPanel(
   // so a new run expands on its own without a keypress.
   if (config.idleMode !== "full" && isIdlePanel(state)) {
     if (config.idleMode === "hidden") return [];
-    const summary = idleSummary(state);
+    const run = runTotals(state);
     // Nothing to summarize is the same as nothing to show.
-    if (!summary) return [];
-    return [
-      truncateToWidth(formatPastTurn(summary, config, theme), safeWidth, "", false),
-    ];
+    if (run.turns <= 0) return [];
+    return [truncateToWidth(formatRunRow(run, config, theme), safeWidth, "", false)];
   }
 
   const terminalRows =
@@ -1107,12 +1148,17 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
     prompt: "",
     pastTurns: [],
     currentTurn: null,
+    run: { turns: 0, tools: 0, durationMs: 0 },
     queued: [],
     notices: [],
     tick: 0,
     now: 0,
     turnCounter: 0,
   };
+
+  // Turn numbers already folded into `state.run`, so a turn counted at turn_end
+  // is not counted again when it is archived or when the run settles.
+  const countedTurns = new Set<number>();
 
   let config: PanelConfig = { ...DEFAULT_CONFIG };
   let configWarned = false;
@@ -1171,12 +1217,52 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
     state.prompt = "";
     state.pastTurns = [];
     state.currentTurn = null;
+    state.run = { turns: 0, tools: 0, durationMs: 0 };
+    countedTurns.clear();
     state.queued = [];
     state.notices = [];
     state.tick = 0;
     state.now = 0;
     state.turnCounter = 0;
     promptSeen = false;
+  }
+
+  /** Start a fresh run summary; called when a new run begins, not on retries. */
+  function resetRun(): void {
+    countedTurns.clear();
+    state.run = { turns: 0, tools: 0, durationMs: 0 };
+  }
+
+  /**
+   * Fold a finished turn into the run totals exactly once. A turn that never saw
+   * `turn_end` (abort, retry, mid-run prompt) still contributes its elapsed time
+   * and tool count.
+   */
+  function countTurn(turn: TurnRecord | null | undefined): void {
+    if (!turn || countedTurns.has(turn.number)) return;
+    countedTurns.add(turn.number);
+    const run =
+      state.run ?? (state.run = { turns: 0, tools: 0, durationMs: 0 });
+    run.turns += 1;
+    run.tools += turn.toolCount ?? turn.tools.length;
+    run.durationMs +=
+      typeof turn.elapsedMs === "number" ? turn.elapsedMs : 0;
+    if (turn.aborted) run.aborted = true;
+  }
+
+  /** Fill in a missing elapsed time / tool count, then count the turn. */
+  function finalizeTurn(turn: TurnRecord | null | undefined): void {
+    if (!turn) return;
+    if (typeof turn.elapsedMs !== "number") {
+      turn.elapsedMs = Math.max(
+        0,
+        (state.now || Date.now()) - turn.startedAt,
+      );
+    }
+    if (typeof turn.toolCount !== "number") {
+      turn.toolCount = turn.tools.length;
+    }
+    countTurn(turn);
   }
 
   function trimPastTurns(): void {
@@ -1340,6 +1426,8 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
 
     promptSeen = true;
     state.prompt = String(event.text ?? "");
+    state.now = Date.now();
+    finalizeTurn(state.currentTurn);
     archiveCurrentTurn();
     state.currentTurn = null;
     // Turn numbering stays monotonic for the session: past-turn rows survive a
@@ -1347,7 +1435,6 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
     state.notices = [];
     state.queued = [];
     state.phase = "primed";
-    state.now = Date.now();
     mount(ctx);
     scheduleRender();
   });
@@ -1363,6 +1450,9 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
 
   pi.on("agent_start", (_event, ctx) => {
     if (ctx.mode !== "tui") return;
+    // A retry or queued continuation re-enters the same run; only a run starting
+    // from idle/primed begins a new set of totals.
+    if (state.phase !== "running") resetRun();
     state.phase = "running";
     state.now = Date.now();
     if (config.enabled) startTimer();
@@ -1371,6 +1461,8 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
 
   pi.on("turn_start", (_event, ctx) => {
     if (ctx.mode !== "tui") return;
+    state.now = Date.now();
+    finalizeTurn(state.currentTurn);
     archiveCurrentTurn();
     state.currentTurn = null;
     state.turnCounter = (state.turnCounter ?? 0) + 1;
@@ -1393,6 +1485,7 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
     turn.completed = true;
     turn.elapsedMs = Math.max(0, state.now - turn.startedAt);
     turn.toolCount = turn.tools.length;
+    countTurn(turn);
     scheduleRender();
   });
 
@@ -1431,6 +1524,9 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
     } else {
       state.phase = "idle";
     }
+    // Covers the last turn of the run, including an aborted one that never saw
+    // `turn_end`.
+    finalizeTurn(turn);
     scheduleRender();
   });
 
