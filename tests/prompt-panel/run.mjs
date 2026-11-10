@@ -219,8 +219,8 @@ function describeOverflow(lines, width) {
 {
   const result = parseConfig({});
   check(
-    "parseConfig({}): idleMode defaults to full",
-    !result.error && result.config.idleMode === "full",
+    "parseConfig({}): idleMode defaults to glyph",
+    !result.error && result.config.idleMode === "glyph",
     JSON.stringify(result),
   );
 }
@@ -763,10 +763,16 @@ for (const width of [10, 40, 60, 200]) {
   const tempAgent = mkdtempSync(join(here, ".tmp-agent-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = tempAgent;
+  // This block exercises the tree itself, so pin the pre-collapse idle mode.
+  writeFileSync(
+    join(tempAgent, "prompt-panel.json"),
+    JSON.stringify({ idleMode: "full" }),
+  );
   try {
     const handlers = new Map();
     let command;
     let widget;
+    let toolsExpanded = false;
     const notifications = [];
     const tui = {
       terminal: { rows: 24 },
@@ -794,7 +800,7 @@ for (const width of [10, 40, 60, 200]) {
         }
       },
       getToolsExpanded() {
-        return false;
+        return toolsExpanded;
       },
     };
     const ctx = { mode: "tui", ui };
@@ -895,6 +901,13 @@ for (const width of [10, 40, 60, 200]) {
         !collapsed[0].includes("fetch.ts"),
       JSON.stringify(collapsed),
     );
+    toolsExpanded = true;
+    check(
+      "lifecycle: ctrl+o expands the idle glyph back to the full tree",
+      widget.render(80).length > 1,
+      JSON.stringify(widget.render(80)),
+    );
+    toolsExpanded = false;
     await call("input", { source: "interactive", text: "third prompt" });
     check(
       "lifecycle: a new prompt expands the collapsed panel without a keypress",
@@ -1640,10 +1653,15 @@ for (const glyphs of ["unicode", "ascii"]) {
       ...overrides,
     });
 
-  const full = render(finishedState(), cfg(), 80).map(plain);
-  const glyph = render(finishedState(), cfg({ idleMode: "glyph" }), 80).map(plain);
+  const full = render(finishedState(), cfg({ idleMode: "full" }), 80).map(plain);
+  const glyph = render(finishedState(), cfg(), 80).map(plain);
   check(
-    "idleMode defaults to the finished tree",
+    "idleMode defaults to the one-row glyph",
+    glyph.length === 1 && glyph[0].includes("turns"),
+    JSON.stringify(glyph),
+  );
+  check(
+    "idleMode=full keeps the finished tree",
     full.length > 1 && full.some((line) => line.includes("turn 3")),
     JSON.stringify(full),
   );
@@ -1659,6 +1677,45 @@ for (const glyphs of ["unicode", "ascii"]) {
       !glyph[0].includes("fetch.ts") &&
       !glyph[0].includes("pnpm test"),
     JSON.stringify(glyph),
+  );
+  check(
+    "expanding the glyph reveals the full panel instead of the one row",
+    renderPanel(
+      finishedState(),
+      { config: cfg({ expand: "follow" }), expanded: true, terminalRows: 24 },
+      80,
+      theme,
+    ).map(plain).length > 1,
+  );
+  check(
+    "expand=always also overrides idle collapse",
+    render(finishedState(), cfg({ expand: "always" }), 80).length > 1,
+  );
+  check(
+    "expand=never keeps the glyph even when ctrl+o is on",
+    renderPanel(
+      finishedState(),
+      {
+        config: cfg({ expand: "never" }),
+        expanded: true,
+        terminalRows: 24,
+      },
+      80,
+      theme,
+    ).map(plain).length === 1,
+  );
+  check(
+    "idleMode=hidden also expands to the full panel",
+    renderPanel(
+      finishedState(),
+      {
+        config: cfg({ expand: "follow", idleMode: "hidden" }),
+        expanded: true,
+        terminalRows: 24,
+      },
+      80,
+      theme,
+    ).map(plain).length > 1,
   );
   check(
     "idleMode=glyph shows run totals: turns, tools, and summed time",

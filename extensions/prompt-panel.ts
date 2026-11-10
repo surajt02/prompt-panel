@@ -60,7 +60,7 @@ export const DEFAULT_CONFIG: Readonly<PanelConfig> = Object.freeze({
   pulseMs: 600,
   thinkingMs: 500,
   expand: "follow",
-  idleMode: "full",
+  idleMode: "glyph",
   glyphs: "unicode",
 });
 
@@ -964,17 +964,6 @@ export function renderPanel(
   const config: PanelConfig = { ...DEFAULT_CONFIG, ...(options?.config ?? {}) };
   const glyphs = glyphsFor(config.glyphs);
 
-  // Idle collapse: one summary row instead of the finished tree, or nothing at
-  // all. Any active phase (primed/running/interrupted) renders the full panel,
-  // so a new run expands on its own without a keypress.
-  if (config.idleMode !== "full" && isIdlePanel(state)) {
-    if (config.idleMode === "hidden") return [];
-    const run = runTotals(state);
-    // Nothing to summarize is the same as nothing to show.
-    if (run.turns <= 0) return [];
-    return [truncateToWidth(formatRunRow(run, config, theme), safeWidth, "", false)];
-  }
-
   const terminalRows =
     options?.terminalRows ?? process.stdout.rows ?? 24;
   const budget = Math.min(
@@ -989,6 +978,19 @@ export function renderPanel(
       : config.expand === "never"
         ? false
         : options?.expanded === true;
+
+  // Idle collapse: one summary row instead of the finished tree, or nothing at
+  // all. Any active phase (primed/running/interrupted) renders the full panel,
+  // so a new run expands on its own without a keypress. Expanding the panel
+  // also reveals the finished tree, so the glyph is never a dead end.
+  if (config.idleMode !== "full" && !expanded && isIdlePanel(state)) {
+    if (config.idleMode === "hidden") return [];
+    const run = runTotals(state);
+    // Nothing to summarize is the same as nothing to show.
+    if (run.turns <= 0) return [];
+    return [truncateToWidth(formatRunRow(run, config, theme), safeWidth, "", false)];
+  }
+
   const expandRoom = Math.max(budget, Math.floor(terminalRows * 0.6));
   const cap = expanded ? Math.min(HARD_MAX_ROWS, expandRoom) : budget;
 
