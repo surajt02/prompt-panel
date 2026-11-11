@@ -2,8 +2,8 @@
 
 A [Pi](https://pi.dev) extension that puts two things directly above the prompt editor:
 
-1. **Your current prompt**, pinned and truncated, so you never lose track of the ask while the
-   agent scrolls the conversation away.
+1. **Your current prompt**, pinned, italic, and ellipsized at a word boundary, so you never lose
+   track of the ask while the agent scrolls the conversation away.
 2. **A live tree of what the agent is doing** — thinking, tool calls, edits with diffstats —
    Claude-Code style.
 
@@ -44,7 +44,8 @@ session. A symlink works: Pi resolves the import map for `@earendil-works/pi-tui
 repo does not need `node_modules` at runtime. The package also carries a `pi.extensions` manifest,
 so it can be installed as a Pi package later.
 
-Requires Pi **1.5.0+**. Non-interactive modes (`--print`, JSON, RPC) are a no-op.
+Requires Pi **1.5.0+** (developed and verified against 1.5.1). Non-interactive modes (`--print`,
+JSON, RPC) are a no-op.
 
 ## Configuration
 
@@ -83,10 +84,18 @@ malformed file produces one error notification and then defaults.
 | `idleMode` | `"glyph"` | What stays on screen once nothing is running: `"glyph"` = one row of run totals (`✓ 5 turns · 13 tools · 54s`), expandable back to the full tree; `"full"` = always the finished tree; `"hidden"` = nothing (also expandable). It applies to `minimal` and `compact`; `expanded` always keeps the tree. |
 | `glyphs` | `"unicode"` | `"ascii"` for terminals without Unicode glyph support. |
 
-Every key is also editable from `/panel`, which opens a settings pane in place of the editor — arrows
-move, `Enter` or `Space` cycles the value on the selected row, page keys page the list, and `Esc`
-closes. It is Pi's own settings list, so it behaves like `/settings` and `/tools`, and each change is
-saved and applied immediately: the panel behind the pane updates as you cycle.
+Every key is also editable from `/panel`, which opens a settings pane in place of the editor —
+arrows move, `Enter` or `Space` cycles the value on the selected row, page keys page the list,
+`Esc` closes, and a click selects and cycles a row. It is Pi's own settings list, so it behaves
+like `/settings` and `/tools`, and each change is saved and applied immediately: the panel behind
+the pane updates as you cycle.
+
+Settings are that file, so they persist across sessions. What does not persist is view state — the
+scroll offset, an expanded prompt, a totals row you clicked open — along with the run tree itself.
+
+A file written before `display` existed usually still has `expand` and `pastTurns`; those are read
+as a mode (`expand: "always"` → `expanded`, `pastTurns: 0` → `minimal`, otherwise `compact`) and
+dropped the next time anything is saved.
 
 ## Commands
 
@@ -110,10 +119,10 @@ the value still applies for the session and you are warned once.
 - **Prompt.** The text is italic — the `❯` stays accent — so the pinned ask cannot be mistaken
   for another block of model output. Collapsed, the prompt is one row ellipsized at a word
   boundary, so the last visible word is never chopped in half; only a single token longer than
-  the row is cut where it has to be. Clicking it — the `❯` or any text on the row — expands the
-  full text in place, wrapped under the text column and opened at its first line, and clicking
-  again collapses it. An expanded prompt longer than the panel is not truncated: scroll it with
-  the mouse wheel. A new prompt always starts collapsed.
+  the row is cut where it has to be. Clicking it — the `❯` or any text on the row — expands
+  the full text in place, wrapped under the text column and opened at its first line, and
+  clicking again collapses it. An expanded prompt longer than the panel is not truncated: scroll
+  it with the mouse wheel. A new prompt always starts collapsed.
 - **Depth.** `display` picks how much of the run the tree keeps, and `/panel display` (or the
   settings pane) switches it while you work:
 
@@ -123,12 +132,12 @@ the value still applies for the session and you are warned once.
   | `compact` | the live turn plus the previous two |
   | `expanded` | every turn the session still retains, with tool arguments and results |
 
-  Each completed turn compresses to one line (`✓ turn 3 · 2 tools · 8.4s`), newest at the bottom;
-  the live turn keeps its thinking row and tool rows in every mode. The mode alone decides the
-  depth: scrolling moves the window inside it and never adds a turn, so the panel's height only
-  changes when the mode, budget, or run state changes. Turns are retained as compact records
-  (number, tool count, duration) up to 500; turn numbers stay monotonic across prompts and never
-  gap.
+  Each completed turn compresses to one line (`✓ turn 3 · 2 tools · 8.4s`), newest at the
+  bottom; the live turn keeps its thinking row and tool rows in every mode. The mode alone
+  decides the depth: scrolling moves the window inside it and never adds a turn, so the panel's
+  height only changes when the mode, budget, or run state changes. Turns are retained as compact
+  records (number, tool count, duration) up to 500; turn numbers stay monotonic across prompts and
+  never gap.
 - **Thinking** is a single row that rewrites itself with the tail of the live buffer. It prefers
   the sentence currently in progress, snaps to a word boundary, and advances at most once per
   `thinkingMs` so it does not crawl per token. It disappears when the turn finishes.
@@ -176,9 +185,9 @@ npm test
 
 The test harness copies `extensions/prompt-panel.ts` into a temporary `.mts` file and imports it
 directly, so it needs no TUI, no session, and no network. It asserts rendered **content**
-(truncation markers, row budgets, glyph pacing, expansion modes, lifecycle transitions), not just
-line widths — the panel clips every line as a safety net, which means a width-only assertion
-cannot detect a layout bug.
+(word-boundary truncation, row budgets, glyph pacing, display modes, the wheel staying inside the
+panel, lifecycle transitions), not just line widths — the panel clips every line as a safety net,
+which means a width-only assertion cannot detect a layout bug.
 
 `docs/` holds no code: `upstream-reveal-entry.md` is the argument for the one Pi API this
 extension is waiting on, kept in the repo so the evidence stays checkable against the Pi version
@@ -201,6 +210,8 @@ it was verified against.
   keyboard binding — plus the verified evidence and prior art are written up in
   [`docs/upstream-reveal-entry.md`](docs/upstream-reveal-entry.md), which is the request to file
   upstream.
+- No keybinding: the panel has no global shortcut. `/panel`, its subcommands, and the mouse are the
+  controls; there is no keyboard equivalent of clicking the prompt or the totals row.
 - Expanded detail covers the live turn only; completed turns are one-liners by design.
 - Width handling is delegated to `@earendil-works/pi-tui`, so the effective version is whatever
   Pi maps extension imports to.
