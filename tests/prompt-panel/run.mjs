@@ -36,6 +36,7 @@ try {
 const {
   DEFAULT_CONFIG,
   DISPLAY_MODES,
+  THINKING_MODES,
   applySettingValue,
   isDisplayMode,
   parseConfig,
@@ -159,6 +160,7 @@ function describeOverflow(lines, width) {
   const expected = [
     "DEFAULT_CONFIG",
     "DISPLAY_MODES",
+    "THINKING_MODES",
     "applySettingValue",
     "countEditDiff",
     "effectiveRowBudget",
@@ -203,6 +205,7 @@ function describeOverflow(lines, width) {
       display: "minimal",
       showPrompt: false,
       showThinking: false,
+      thinkingMode: "glyph",
       thinkingPreviewChars: 20,
       animate: false,
       tickMs: 250,
@@ -218,6 +221,7 @@ function describeOverflow(lines, width) {
       result.config.display === "minimal" &&
       result.config.showPrompt === false &&
       result.config.showThinking === false &&
+      result.config.thinkingMode === "glyph" &&
       result.config.thinkingPreviewChars === 20 &&
       result.config.animate === false &&
       result.config.tickMs === 250 &&
@@ -241,6 +245,7 @@ for (const [label, value] of [
   ["display sometimes", { display: "sometimes" }],
   ["tickMs 0", { tickMs: 0 }],
   ["glyphs nope", { glyphs: "nope" }],
+  ["thinkingMode sometimes", { thinkingMode: "sometimes" }],
   ["idleMode sometimes", { idleMode: "sometimes" }],
   ["enabled string", { enabled: "yes" }],
 ]) {
@@ -256,6 +261,16 @@ for (const [label, value] of [
 }
 
 {
+  check(
+    "parseConfig: thinkingMode defaults to text and lists both modes",
+    !parseConfig({}).error &&
+      parseConfig({}).config.thinkingMode === "text" &&
+      THINKING_MODES.length === 2 &&
+      THINKING_MODES.every(
+        (mode) => parseConfig({ thinkingMode: mode }).config.thinkingMode === mode,
+      ),
+    JSON.stringify(parseConfig({})),
+  );
   check(
     "parseConfig: display defaults to compact",
     parseConfig({}).config.display === "compact",
@@ -1487,21 +1502,42 @@ for (const glyphs of ["unicode", "ascii"]) {
   );
 
   const tokens = "aa bb cc dd ee ff gg hh ii jj kk ll mm nn oo pp".split(" ");
-  const snapped = thinkingRow({
+  const clipped = thinkingRow({
     buffer: tokens.join(" "),
     done: false,
   }, { thinkingPreviewChars: 15 });
-  const preview = snapped.split("Thinking · ")[1] ?? "";
-  const previewTokens = preview
-    .replace(/^…/, "")
-    .split(" ")
-    .filter(Boolean);
+  const preview = clipped.split("Thinking · ")[1] ?? "";
+  const previewTokens = preview.replace(/…$/, "").split(" ").filter(Boolean);
   check(
-    "a truncated thinking preview never starts mid-word",
-    preview.startsWith("…") &&
+    "a truncated thinking preview is a word-boundary head, not a tail fragment",
+    preview.startsWith(tokens[0]) &&
+      !preview.startsWith("…") &&
+      preview.endsWith("…") &&
       previewTokens.length > 0 &&
       previewTokens.every((token) => tokens.includes(token)),
     JSON.stringify(preview),
+  );
+
+  const clause = thinkingRow({
+    buffer:
+      "First I read the file. Now the second clause keeps going and mentions " +
+      "the retry loop, the backoff, and the abort signal before it ends.",
+    done: false,
+  }, { thinkingPreviewChars: 40 });
+  const clauseText = clause.split("Thinking · ")[1] ?? "";
+  check(
+    "thinking clips the clause in progress from its start, not the newest words",
+    clauseText.startsWith("Now the second clause") &&
+      !clauseText.includes("abort signal") &&
+      clauseText.endsWith("…"),
+    JSON.stringify(clauseText),
+  );
+
+  const trailing = thinkingRow({ buffer: "One. Two.", done: false });
+  check(
+    "thinking falls back to the last complete clause when the buffer ends on a terminator",
+    trailing.includes("Two.") && !trailing.includes("One."),
+    JSON.stringify(trailing),
   );
 
   const throttled = thinkingRow({
@@ -1514,6 +1550,105 @@ for (const glyphs of ["unicode", "ascii"]) {
     "thinking renders the throttled snapshot, not the live buffer",
     throttled.includes("older snapshot") && !throttled.includes("much newer"),
     JSON.stringify(throttled),
+  );
+
+  // thinkingMode=glyph: no preview text, just a marker that pulses with the run.
+  const glyphRow = (thinking, overrides = {}) => {
+    const { tick = 0, ...config } = overrides;
+    const state = makeState({
+      tick,
+      currentTurn: { ...base.currentTurn, tools: [], thinking },
+      queued: [],
+      notices: [],
+    });
+    const lines = renderPanel(
+      state,
+      {
+        config: {
+          ...DEFAULT_CONFIG,
+          display: "compact",
+          thinkingMode: "glyph",
+          ...config,
+        },
+        terminalRows: 40,
+      },
+      100,
+      theme,
+    ).map(plain);
+    return lines.find((line) => line.includes("Thinking")) ?? "";
+  };
+  const thought = { buffer: "the retry loop should go before the backoff", done: false };
+  const marker = glyphRow(thought);
+  check(
+    "thinkingMode=glyph shows the marker with no preview text",
+    marker === "    ✻ Thinking" && !marker.includes("retry"),
+    JSON.stringify(marker),
+  );
+
+  const pulsed = [0, 3].map((tick) => glyphRow(thought, { tick }));
+  check(
+    "thinkingMode=glyph pulses the marker at the pulse rate",
+    pulsed[0].includes("✻") && pulsed[1].includes("✶") && pulsed[0] !== pulsed[1],
+    JSON.stringify(pulsed),
+  );
+
+  const frozen = [0, 3].map((tick) => glyphRow(thought, { tick, animate: false }));
+  check(
+    "thinkingMode=glyph honors animate=false",
+    frozen[0] === frozen[1] && frozen[0].includes("✻"),
+    JSON.stringify(frozen),
+  );
+
+  check(
+    "thinkingMode=glyph follows the ascii glyph set",
+    glyphRow(thought, { glyphs: "ascii" }) === "    * Thinking",
+    JSON.stringify(glyphRow(thought, { glyphs: "ascii" })),
+  );
+
+  check(
+    "thinkingMode=glyph stays hidden until the thought has content",
+    glyphRow({ buffer: "", done: false }) === "" &&
+      glyphRow({ buffer: "   ", done: false }) === "",
+    JSON.stringify(glyphRow({ buffer: "", done: false })),
+  );
+
+  check(
+    "thinkingMode=text is the default, so the preview still renders",
+    DEFAULT_CONFIG.thinkingMode === "text" &&
+      thinkingRow(thought).includes("retry loop"),
+    JSON.stringify(thinkingRow(thought)),
+  );
+
+  // The leading mark pulses in text mode too, so the row reads as active.
+  const textPulseRow = (tick, extra = {}) =>
+    renderPanel(
+      makeState({
+        tick,
+        currentTurn: { ...base.currentTurn, tools: [], thinking: thought },
+        queued: [],
+        notices: [],
+      }),
+      {
+        config: { ...DEFAULT_CONFIG, display: "compact", ...extra },
+        terminalRows: 40,
+      },
+      100,
+      theme,
+    )
+      .map(plain)
+      .find((line) => line.includes("Thinking")) ?? "";
+  const textPulsed = [0, 3].map((tick) => textPulseRow(tick));
+  check(
+    "the text preview pulses its glyph at the pulse rate",
+    textPulsed[0].startsWith("    ✻ Thinking · ") &&
+      textPulsed[1].startsWith("    ✶ Thinking · ") &&
+      textPulsed[1].includes("retry loop"),
+    JSON.stringify(textPulsed),
+  );
+  check(
+    "the text preview glyph freezes when animate is off",
+    textPulseRow(3, { animate: false }).startsWith("    ✻ Thinking · "),
+    JSON.stringify(textPulseRow(3, { animate: false })),
   );
 }
 
@@ -2659,7 +2794,8 @@ for (const glyphs of ["unicode", "ascii"]) {
   check(
     "pane: enum rows are stored verbatim",
     applySettingValue("idleMode", "hidden", base).idleMode === "hidden" &&
-      applySettingValue("display", "expanded", base).display === "expanded",
+      applySettingValue("display", "expanded", base).display === "expanded" &&
+      applySettingValue("thinkingMode", "glyph", base).thinkingMode === "glyph",
   );
   check(
     "pane: an unknown id leaves the config alone",

@@ -12,7 +12,7 @@ A [Pi](https://pi.dev) extension that puts two things directly above the prompt 
   ✓ turn 3 · 2 tools · 8.4s
   ✓ turn 4 · 1.1s
   ● turn 5
-    ✻ Thinking · …where the retry loop should go
+    ✻ Thinking · where the retry loop should go, then whether…
     ├ ✓ read  src/…/middleware.ts                          0.1s
     ├ ✓ edit  src/http/fetch.ts                        +9 −2  0.3s
     └ ● bash  pnpm test                                  running
@@ -59,6 +59,7 @@ malformed file produces one error notification and then defaults.
   "display": "compact",
   "showPrompt": true,
   "showThinking": true,
+  "thinkingMode": "text",
   "thinkingPreviewChars": 60,
   "animate": true,
   "tickMs": 200,
@@ -76,7 +77,8 @@ malformed file produces one error notification and then defaults.
 | `display` | `"compact"` | How much of the run to show: `"minimal"` = the prompt and the live turn; `"compact"` = the live turn plus the previous two, one line per tool; `"expanded"` = every retained turn (up to 500), with tool arguments and result previews. |
 | `showPrompt` | `true` | Show the pinned prompt row. |
 | `showThinking` | `true` | Show the thinking row while a turn is live. |
-| `thinkingPreviewChars` | `60` | Width budget of the thinking preview. |
+| `thinkingMode` | `"text"` | How that row reads: `"text"` = the clause in progress, cut at a word boundary; `"glyph"` = just a pulsing `✻ Thinking` marker, no preview text. |
+| `thinkingPreviewChars` | `60` | Width budget of the thinking preview, clipped at a word boundary. |
 | `animate` | `true` | Pulse the running glyph. `false` freezes it and stops the timer. |
 | `tickMs` | `200` | Refresh cadence while a run is active. |
 | `pulseMs` | `600` | How long the running glyph holds before alternating. |
@@ -138,9 +140,15 @@ the value still applies for the session and you are warned once.
   height only changes when the mode, budget, or run state changes. Turns are retained as compact
   records (number, tool count, duration) up to 500; turn numbers stay monotonic across prompts and
   never gap.
-- **Thinking** is a single row that rewrites itself with the tail of the live buffer. It prefers
-  the sentence currently in progress, snaps to a word boundary, and advances at most once per
-  `thinkingMs` so it does not crawl per token. It disappears when the turn finishes.
+- **Thinking** is a single row that shows the clause currently being written, cut at a word
+  boundary with a trailing ellipsis — the same cut the pinned prompt uses — so it reads as the
+  thought in progress rather than as a tail fragment (`…the caller passes down through`). The head
+  only changes when new words fit, so a long clause holds still instead of crawling, and the row
+  advances at most once per `thinkingMs`. Its leading `✻` pulses with the run in both modes
+  (frozen when `animate` is off), independent of the `thinkingMs` text cadence.
+  `thinkingMode: "glyph"` drops the text entirely and leaves just the pulsing `✻ Thinking` marker,
+  for readers who would rather see that something is happening than read a clipped sentence. The
+  row disappears when the turn finishes, and stays hidden until the thought has content.
 - **Tools** show a status glyph (`✓` / `✗` / pulsing `●`), the tool name, a one-line argument
   summary, and a duration. Paths ellipsize in the middle so the filename survives; every other
   summary ellipsizes at the end. Nested calls (`parentToolCallId`) indent one level; parallel

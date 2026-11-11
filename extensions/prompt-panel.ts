@@ -9,7 +9,6 @@ import { dirname, join } from "node:path";
 import {
   Container,
   SettingsList,
-  sliceByColumn,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
@@ -40,6 +39,8 @@ export interface PanelConfig {
   display: DisplayMode;
   showPrompt: boolean;
   showThinking: boolean;
+  /** How the live thinking row reads: the clause in progress, or a bare marker. */
+  thinkingMode: ThinkingMode;
   thinkingPreviewChars: number;
   animate: boolean;
   tickMs: number;
@@ -84,12 +85,26 @@ export function pastTurnsFor(display: DisplayMode): number {
 /** What the panel shows once a run has settled and nothing is executing. */
 export type IdleMode = "full" | "glyph" | "hidden";
 
+/**
+ * How the live thinking row reads.
+ *
+ * - `text`: the clause currently being written, cut at a word boundary.
+ * - `glyph`: just a pulsing `Thinking` marker, with no preview text.
+ */
+export type ThinkingMode = "text" | "glyph";
+
+export const THINKING_MODES: readonly ThinkingMode[] = Object.freeze([
+  "text",
+  "glyph",
+]);
+
 export const DEFAULT_CONFIG: Readonly<PanelConfig> = Object.freeze({
   enabled: true,
   maxRows: "auto",
   display: "compact",
   showPrompt: true,
   showThinking: true,
+  thinkingMode: "text",
   thinkingPreviewChars: 60,
   animate: true,
   tickMs: 200,
@@ -218,6 +233,8 @@ interface Glyphs {
   running: string;
   runningAlt: string;
   thinking: string;
+  /** Alternate mark, so the glyph-mode row can pulse like a running tool. */
+  thinkingAlt: string;
   branch: string;
   last: string;
   dot: string;
@@ -238,6 +255,7 @@ function glyphsFor(mode: GlyphMode): Glyphs {
       running: "*",
       runningAlt: "o",
       thinking: "*",
+      thinkingAlt: "o",
       branch: "|",
       last: "+",
       dot: ".",
@@ -255,6 +273,7 @@ function glyphsFor(mode: GlyphMode): Glyphs {
     running: "●",
     runningAlt: "○",
     thinking: "✻",
+    thinkingAlt: "✶",
     branch: "├",
     last: "└",
     dot: "·",
@@ -339,6 +358,11 @@ export function parseConfig(input: unknown): ParseConfigResult {
     if (typeof value.showThinking === "boolean") {
       config.showThinking = value.showThinking;
     } else errors.push("showThinking must be a boolean");
+  }
+  if (hasOwn(value, "thinkingMode")) {
+    if (value.thinkingMode === "text" || value.thinkingMode === "glyph") {
+      config.thinkingMode = value.thinkingMode;
+    } else errors.push('thinkingMode must be "text" or "glyph"');
   }
   if (hasOwn(value, "thinkingPreviewChars")) {
     if (isIntegerInRange(value.thinkingPreviewChars, 1, 1000)) {
@@ -455,6 +479,14 @@ export function settingsItems(config: PanelConfig): SettingItem[] {
       values: ON_OFF,
     },
     {
+      id: "thinkingMode",
+      label: "thinkingMode",
+      description:
+        "How the live thinking row reads: the clause in progress cut at a word boundary, or just a pulsing marker with no text.",
+      currentValue: config.thinkingMode,
+      values: [...THINKING_MODES],
+    },
+    {
       id: "thinkingPreviewChars",
       label: "thinkingPreviewChars",
       description: "Width budget of the thinking preview.",
@@ -529,6 +561,7 @@ export function applySettingValue(
     case "display":
     case "idleMode":
     case "glyphs":
+    case "thinkingMode":
       next[id] = value;
       break;
     default:
@@ -931,43 +964,62 @@ function lastSentence(text: string): string {
   return index >= 0 ? text.slice(index + 2).trim() : "";
 }
 
-/** Drop a leading partial word so the row never starts mid-word. */
-function snapToWordStart(text: string): string {
-  if (text === "") return text;
-  if (/^\s/.test(text)) return text.replace(/^\s+/, "");
-  const space = text.indexOf(" ");
-  // Only snap in the first column or two of content; a long partial word stays.
-  return space > 0 && space <= 12 ? text.slice(space + 1) : text;
-}
-
-function thinkingTail(
+/**
+ * The thinking row. It reads like a thought, not like a log tail: the clause
+ * currently being written is cut at a word boundary with a trailing ellipsis,
+ * the same way the pinned prompt is cut. A tail cut opened mid-phrase
+ * (`…the caller passes down through`) and read as a fragment of a sentence
+ * rather than as the sentence in progress.
+ *
+ * Taking the head also means the row holds still while a long clause streams:
+ * once the visible words stop changing the row stops changing, and a new clause
+ * swaps it. The `thinkingMs` throttle keeps a short clause from flickering.
+ */
+function thinkingPreview(
   thinking: ThinkingRecord,
   config: PanelConfig,
   width: number,
   glyphs: Glyphs,
+  mark: string = glyphs.thinking,
 ): string | undefined {
   const clean = collapseWhitespace(thinking.preview ?? thinking.buffer);
   if (clean === "") return undefined;
 
-  const prefix = `    ${glyphs.thinking} Thinking ${glyphs.dot} `;
+  const prefix = `    ${mark} Thinking ${glyphs.dot} `;
   const limit = Math.max(1, Math.floor(config.thinkingPreviewChars));
-  const available = Math.max(0, width - visibleWidth(prefix) - visibleWidth(glyphs.ellipsis));
-  const total = visibleWidth(clean);
-  const take = Math.max(1, Math.min(limit, available));
+  const available = Math.max(1, width - visibleWidth(prefix));
+  const budget = Math.max(1, Math.min(limit, available));
+  // Prefer the clause in progress. Ending on a terminator leaves that clause
+  // empty, and the last complete one reads better than a blank row.
+  const clause = lastSentence(clean) || clean;
+  return `${prefix}${truncateAtWord(clause, budget, glyphs.ellipsis)}`;
+}
 
-  // Prefer the sentence in progress: it reads like a thought and holds still
-  // until the sentence ends, instead of sliding one character at a time.
-  const sentence = lastSentence(clean);
-  if (sentence !== "" && visibleWidth(sentence) <= take) {
-    return `${prefix}${sentence}`;
+/**
+ * The live thinking row. `thinkingMode: "text"` shows the clause in progress;
+ * `"glyph"` shows only a pulsing marker, for readers who find a truncated
+ * sentence more distracting than no sentence at all. Both modes pulse the
+ * leading mark, so the row reads as active whether or not it carries text.
+ *
+ * Both modes go quiet on an empty buffer: `message_start` creates a thinking
+ * record for every assistant message, and a model that is not reasoning would
+ * otherwise leave a permanent `Thinking` row behind.
+ */
+function renderThinkingRow(
+  thinking: ThinkingRecord,
+  config: PanelConfig,
+  state: PanelState,
+  width: number,
+  glyphs: Glyphs,
+): string | undefined {
+  if (collapseWhitespace(thinking.preview ?? thinking.buffer) === "") {
+    return undefined;
   }
-
-  if (total <= take) {
-    return `${prefix}${clean}`;
+  const mark = pulseOn(state, config) ? glyphs.thinkingAlt : glyphs.thinking;
+  if (config.thinkingMode === "glyph") {
+    return `    ${mark} Thinking`;
   }
-  const start = Math.max(0, total - take);
-  const tail = sliceByColumn(clean, start, take);
-  return `${prefix}${glyphs.ellipsis}${snapToWordStart(tail)}`;
+  return thinkingPreview(thinking, config, width, glyphs, mark);
 }
 
 function formatArgsForPreview(args: unknown): string {
@@ -1143,7 +1195,7 @@ function renderTurn(
   const turnFinished = turn.completed === true || turn.aborted === true;
   if (config.showThinking && turn.thinking && !turnFinished) {
     const glyphs = glyphsFor(config.glyphs);
-    const row = thinkingTail(turn.thinking, config, width, glyphs);
+    const row = renderThinkingRow(turn.thinking, config, state, width, glyphs);
     if (row) lines.push(paint(theme, "thinkingText", row));
   }
 
