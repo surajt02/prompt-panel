@@ -960,12 +960,23 @@ for (const width of [10, 40, 60, 200]) {
       JSON.stringify(collapsed),
     );
     toolsExpanded = true;
+    const ctrlOOpen = widget.render(80);
     check(
-      "lifecycle: ctrl+o no longer overrides the mode's idle glyph",
+      "lifecycle: ctrl+o expands the panel while idleMode=glyph",
+      ctrlOOpen.length > 1 && ctrlOOpen.join("\n").includes("fetch.ts"),
+      JSON.stringify(ctrlOOpen),
+    );
+    check(
+      "lifecycle: ctrl+o leaves the configured mode on disk",
+      JSON.parse(readFileSync(join(tempAgent, "prompt-panel.json"), "utf8"))
+        .display === "compact",
+    );
+    toolsExpanded = false;
+    check(
+      "lifecycle: toggling ctrl+o off restores the configured idle glyph",
       widget.render(80).length === 1,
       JSON.stringify(widget.render(80)),
     );
-    toolsExpanded = false;
     await command.handler("display expanded", ctx);
     check(
       "lifecycle: /panel display expanded reveals the finished tree while idle",
@@ -1510,6 +1521,44 @@ for (const glyphs of ["unicode", "ascii"]) {
   check(
     "display=minimal also keeps tools on one line",
     !showsArgs({ display: "minimal" }),
+  );
+}
+
+// Pi's own tool-output expansion (`ctrl+o`, `app.tools.expand`) overlays the
+// expanded view on whatever `display` is configured. It is render input only:
+// never a config key, never persisted, and gone again when the toggle is off.
+{
+  const base = makeState();
+  const at = (config, toolsExpanded) =>
+    renderPanel(
+      base,
+      { config, toolsExpanded, terminalRows: 100 },
+      100,
+      theme,
+    ).map(plain);
+  const compact = { ...DEFAULT_CONFIG, display: "compact" };
+
+  const closed = at(compact, false);
+  const open = at(compact, true);
+  check(
+    "ctrl+o overlays the expanded view on the configured mode",
+    !closed.some((line) => line.includes('"path"')) &&
+      open.some((line) => line.includes('"path"')) &&
+      open.some((line) => line.includes("Error: the test suite failed")) &&
+      !("toolsExpanded" in DEFAULT_CONFIG),
+    JSON.stringify(open.slice(0, 4)),
+  );
+  check(
+    "ctrl+o expands from minimal too: retained turns plus tool arguments",
+    at({ ...DEFAULT_CONFIG, display: "minimal" }, true).some((line) =>
+      line.includes("turn 1"),
+    ),
+    JSON.stringify(at({ ...DEFAULT_CONFIG, display: "minimal" }, true)),
+  );
+  check(
+    "ctrl+o off returns to the configured depth",
+    at({ ...DEFAULT_CONFIG, display: "minimal" }, false).length <
+      at({ ...DEFAULT_CONFIG, display: "minimal" }, true).length,
   );
 }
 
@@ -2666,6 +2715,27 @@ for (const glyphs of ["unicode", "ascii"]) {
       80,
       theme,
     ).map(plain).length > 1,
+  );
+  check(
+    "ctrl+o expands a collapsed idle panel, and only while it is on",
+    renderPanel(
+      finishedState(),
+      { config: cfg({ idleMode: "glyph" }), terminalRows: 24, toolsExpanded: true },
+      80,
+      theme,
+    ).map(plain).length > 1 &&
+      renderPanel(
+        finishedState(),
+        { config: cfg({ idleMode: "hidden" }), terminalRows: 24, toolsExpanded: true },
+        80,
+        theme,
+      ).map(plain).length > 1 &&
+      renderPanel(
+        finishedState(),
+        { config: cfg({ idleMode: "glyph" }), terminalRows: 24, toolsExpanded: false },
+        80,
+        theme,
+      ).map(plain).length === 1,
   );
   check(
     "idleMode=glyph shows run totals: turns, tools, and summed time",

@@ -214,6 +214,14 @@ export interface PanelRenderOptions {
   config?: Partial<PanelConfig>;
   terminalRows?: number;
   /**
+   * Pi's own tool-output expansion (`ctrl+o`, or whatever `app.tools.expand` is
+   * bound to). While it is on the panel renders as `display: "expanded"` — a
+   * transient overlay, so nothing is persisted and the configured mode returns
+   * when it goes off. Read at render time, because Pi emits no event for the
+   * toggle.
+   */
+  toolsExpanded?: boolean;
+  /**
    * Reports the rendered window, so a host can map a click's local y onto the
    * prompt block or the totals row, and clamp its own scroll offset.
    */
@@ -1407,7 +1415,11 @@ export function renderPanel(
   );
   // Expanded content may grow past the collapsed budget, but it must never eat
   // most of the screen: cap it at 60% of the terminal, and at the hard ceiling.
-  const expanded = config.display === "expanded";
+  // Pi's own tool-output expansion (`ctrl+o`) asks for the same view. It is an
+  // overlay on top of the mode, not a second persistent setting: the config is
+  // untouched, so the configured mode returns as soon as the toggle goes off.
+  const expanded =
+    config.display === "expanded" || options?.toolsExpanded === true;
 
   // Idle collapse: one totals row instead of the finished tree, or nothing at
   // all. Any active phase (primed/running/interrupted) renders the full panel,
@@ -1881,6 +1893,9 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
               state,
               {
                 config,
+                // Read per frame: Pi toggles this without emitting an event, so
+                // the widget's own render is the only place that observes it.
+                toolsExpanded: ctx.ui.getToolsExpanded?.() === true,
                 terminalRows: tui.terminal?.rows ?? process.stdout.rows ?? 24,
                 onLayout: (next) => {
                   layout = next;

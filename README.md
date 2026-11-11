@@ -74,7 +74,7 @@ malformed file produces one error notification and then defaults.
 | --- | --- | --- |
 | `enabled` | `true` | Master switch; off removes the widget and its timer. |
 | `maxRows` | `"auto"` | `"auto"` = 30% of the terminal height, clamped 6–18. A number is clamped 1–48. |
-| `display` | `"compact"` | How much of the run to show: `"minimal"` = the prompt and the live turn; `"compact"` = the live turn plus the previous two, one line per tool; `"expanded"` = every retained turn (up to 500), with tool arguments and result previews. |
+| `display` | `"compact"` | How much of the run to show: `"minimal"` = the prompt and the live turn; `"compact"` = the live turn plus the previous two, one line per tool; `"expanded"` = every retained turn (up to 500), with tool arguments and result previews. Pi's `ctrl+o` shows the `expanded` view while it is on without changing this value. |
 | `showPrompt` | `true` | Show the pinned prompt row. |
 | `showThinking` | `true` | Show the thinking row while a turn is live. |
 | `thinkingMode` | `"text"` | How that row reads: `"text"` = the clause in progress, cut at a word boundary; `"glyph"` = just a pulsing `✻ Thinking` marker, no preview text. |
@@ -135,11 +135,11 @@ the value still applies for the session and you are warned once.
   | `expanded` | every turn the session still retains, with tool arguments and results |
 
   Each completed turn compresses to one line (`✓ turn 3 · 2 tools · 8.4s`), newest at the
-  bottom; the live turn keeps its thinking row and tool rows in every mode. The mode alone
-  decides the depth: scrolling moves the window inside it and never adds a turn, so the panel's
-  height only changes when the mode, budget, or run state changes. Turns are retained as compact
-  records (number, tool count, duration) up to 500; turn numbers stay monotonic across prompts and
-  never gap.
+  bottom; the live turn keeps its thinking row and tool rows in every mode. The mode decides the
+  depth (Pi's `ctrl+o` overlays `expanded` on top of it, see below): scrolling moves the window
+  inside it and never adds a turn, so the panel's height only changes when the mode, budget, or
+  run state changes. Turns are retained as compact records (number, tool count, duration) up to
+  500; turn numbers stay monotonic across prompts and never gap.
 - **Thinking** is a single row that shows the clause currently being written, cut at a word
   boundary with a trailing ellipsis — the same cut the pinned prompt uses — so it reads as the
   thought in progress rather than as a tail fragment (`…the caller passes down through`). The head
@@ -157,8 +157,12 @@ the value still applies for the session and you are warned once.
   connector — and each of those two groups keeps event order.
 - **Expansion** is the `expanded` mode: arguments up to 3 wrapped lines plus a result preview up
   to 5 lines, errors in the error colour, and every retained turn. `minimal` and `compact` keep
-  one line per tool, so the panel stays readable while you work; Pi's own `ctrl+o` still expands
-  the transcript, but it no longer changes the panel — the mode is the only switch. Expanded
+  one line per tool, so the panel stays readable while you work. Pi's own `ctrl+o` (whatever
+  `app.tools.expand` is bound to) shows that view too while it is on: it expands the transcript
+  as it always did, and the panel follows it. That is an overlay, not a second setting — nothing
+  is written to the config, `/panel status` and the settings pane keep reporting the configured
+  mode, and the panel returns to it the moment `ctrl+o` goes off. It also wins over `idleMode`,
+  the way `display: "expanded"` does, so a collapsed totals row opens while it is held. Expanded
   output is windowed to 48 lines or 60% of the terminal, whichever is larger, and scrolls inside
   the panel — the wheel over the panel moves it one to five rows at a time, and `… N earlier` /
   `… N more` markers show what is off-screen. The wheel never leaves the panel while the pointer
@@ -173,10 +177,10 @@ the value still applies for the session and you are warned once.
   tree the mode would render, with the totals row repeated at the bottom as the control that
   folds it again — so you can inspect a finished run without changing the mode. A new prompt, or
   the next run settling, folds it back. `idleMode: "full"` always keeps the tree and `"hidden"`
-  removes the row entirely, though `display: "expanded"` keeps the tree either way. Esc freezes the
-  tree with the active rows marked interrupted (an interrupted panel stays expanded). A new
-  prompt swaps the prompt line, archives the tree, and clears the live turn. `/new`, `/resume`,
-  `/tree`, and `/reload` reset it; resuming a session replays nothing.
+  removes the row entirely, though `display: "expanded"` — or `ctrl+o` held on — keeps the tree
+  either way. Esc freezes the tree with the active rows marked interrupted (an interrupted panel
+  stays expanded). A new prompt swaps the prompt line, archives the tree, and clears the live
+  turn. `/new`, `/resume`, `/tree`, and `/reload` reset it; resuming a session replays nothing.
 - **Cost when idle.** Zero. The interval runs only while a run is active and is cleared on settle,
   abort, shutdown, disable, and disposal.
 
@@ -195,9 +199,9 @@ npm test
 
 The test harness copies `extensions/prompt-panel.ts` into a temporary `.mts` file and imports it
 directly, so it needs no TUI, no session, and no network. It asserts rendered **content**
-(word-boundary truncation, row budgets, glyph pacing, display modes, the wheel staying inside the
-panel, lifecycle transitions), not just line widths — the panel clips every line as a safety net,
-which means a width-only assertion cannot detect a layout bug.
+(word-boundary truncation, row budgets, glyph pacing, display modes, the `ctrl+o` overlay, the
+wheel staying inside the panel, lifecycle transitions), not just line widths — the panel clips
+every line as a safety net, which means a width-only assertion cannot detect a layout bug.
 
 `docs/` holds no code: `upstream-reveal-entry.md` is the argument for the one Pi API this
 extension is waiting on, kept in the repo so the evidence stays checkable against the Pi version
@@ -209,9 +213,9 @@ it was verified against.
   while the pointer is over it — it scrolls its own window when the content overflows and does
   nothing at the ends. It never scrolls the transcript, which also means a panel short enough to
   fit is a no-op for the wheel rather than a pass-through. Other rows are display-only; use
-  `/panel display expanded` for tool arguments and results. Clicks and wheel events require Pi's
-  fullscreen TUI (`tuiMode: "fullscreen"`, the default) — regular mode leaves mouse reporting to
-  the terminal, so no mouse events reach extensions there.
+  `/panel display expanded` (or `ctrl+o`) for tool arguments and results. Clicks and wheel events
+  require Pi's fullscreen TUI (`tuiMode: "fullscreen"`, the default) — regular mode leaves mouse
+  reporting to the terminal, so no mouse events reach extensions there.
 - No jump-to-block: the Pi extension API has no transcript scroll hook, so a tree row cannot take
   you to the corresponding conversation block, and the panel cannot build one on its own — the
   transcript handle, and the entry-to-row map, are private. Turns are retained as compact records
@@ -220,8 +224,10 @@ it was verified against.
   keyboard binding — plus the verified evidence and prior art are written up in
   [`docs/upstream-reveal-entry.md`](docs/upstream-reveal-entry.md), which is the request to file
   upstream.
-- No keybinding: the panel has no global shortcut. `/panel`, its subcommands, and the mouse are the
-  controls; there is no keyboard equivalent of clicking the prompt or the totals row.
+- No keybinding: the panel registers no shortcut of its own, so there is no keyboard equivalent of
+  clicking the prompt or the totals row. `/panel`, its subcommands, and the mouse are the controls.
+  `ctrl+o` is Pi's binding (`app.tools.expand`), not the panel's: the panel only reads its state,
+  which is why rebinding it in `keybindings.json` moves both together.
 - Expanded detail covers the live turn only; completed turns are one-liners by design.
 - Width handling is delegated to `@earendil-works/pi-tui`, so the effective version is whatever
   Pi maps extension imports to.
