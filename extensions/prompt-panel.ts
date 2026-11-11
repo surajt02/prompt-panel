@@ -1177,6 +1177,73 @@ function renderToolRow(
   return `${clippedLeft}${" ".repeat(padding)}${right}`;
 }
 
+/**
+ * Display order for the live turn's tool rows: finished calls above running
+ * ones. Pi runs a tool batch in parallel, so a later call can finish first;
+ * start order alone would leave finished work below a call still in flight,
+ * when it belongs above the row that is happening now.
+ *
+ * A running call ranks with its whole subtree, so a nested call never floats
+ * above the parent it is indented under. Event order is kept inside each
+ * group. Records whose parent is missing (or in a parent cycle) stay
+ * top-level, so nothing is dropped from the tree.
+ */
+function orderToolRows(tools: readonly ToolRecord[]): ToolRecord[] {
+  const byId = new Map<string, ToolRecord>();
+  for (const tool of tools) {
+    if (tool.id && !byId.has(tool.id)) byId.set(tool.id, tool);
+  }
+
+  const childrenByParent = new Map<ToolRecord, ToolRecord[]>();
+  const nested = new Set<ToolRecord>();
+  for (const tool of tools) {
+    const parent =
+      tool.parentToolCallId !== undefined && tool.parentToolCallId !== tool.id
+        ? byId.get(tool.parentToolCallId)
+        : undefined;
+    if (!parent) continue;
+    const group = childrenByParent.get(parent);
+    if (group) group.push(tool);
+    else childrenByParent.set(parent, [tool]);
+    nested.add(tool);
+  }
+
+  // A group is active while it or any descendant is still executing.
+  const active = (
+    tool: ToolRecord,
+    seen: Set<ToolRecord> = new Set(),
+  ): boolean => {
+    if (seen.has(tool)) return false;
+    seen.add(tool);
+    if (tool.status === "running") return true;
+    return (childrenByParent.get(tool) ?? []).some((child) =>
+      active(child, seen),
+    );
+  };
+
+  // Stable partition: finished rows first, running rows last.
+  const partition = (group: readonly ToolRecord[]): readonly ToolRecord[] => [
+    ...group.filter((tool) => !active(tool)),
+    ...group.filter((tool) => active(tool)),
+  ];
+
+  const ordered: ToolRecord[] = [];
+  const placed = new Set<ToolRecord>();
+  const place = (group: readonly ToolRecord[]): void => {
+    for (const tool of partition(group)) {
+      if (placed.has(tool)) continue;
+      placed.add(tool);
+      ordered.push(tool);
+      place(childrenByParent.get(tool) ?? []);
+    }
+  };
+
+  place(tools.filter((tool) => !nested.has(tool)));
+  // Anything unreachable from a root — a parent cycle — still renders.
+  place(tools);
+  return ordered;
+}
+
 function renderTurn(
   turn: TurnRecord,
   config: PanelConfig,
@@ -1199,7 +1266,7 @@ function renderTurn(
     if (row) lines.push(paint(theme, "thinkingText", row));
   }
 
-  const tools = Array.isArray(turn.tools) ? turn.tools : [];
+  const tools = orderToolRows(Array.isArray(turn.tools) ? turn.tools : []);
   for (let index = 0; index < tools.length; index++) {
     const tool = tools[index];
     let isLast = true;

@@ -151,8 +151,10 @@ the value still applies for the session and you are warned once.
   row disappears when the turn finishes, and stays hidden until the thought has content.
 - **Tools** show a status glyph (`✓` / `✗` / pulsing `●`), the tool name, a one-line argument
   summary, and a duration. Paths ellipsize in the middle so the filename survives; every other
-  summary ellipsizes at the end. Nested calls (`parentToolCallId`) indent one level; parallel
-  calls stay in event order.
+  summary ellipsizes at the end. Nested calls (`parentToolCallId`) indent one level and stay under
+  the parent they belong to. A batch runs in parallel, so a later call can finish first: finished
+  rows stack above the calls still running — the running row is the last one, on the `└`
+  connector — and each of those two groups keeps event order.
 - **Expansion** is the `expanded` mode: arguments up to 3 wrapped lines plus a result preview up
   to 5 lines, errors in the error colour, and every retained turn. `minimal` and `compact` keep
   one line per tool, so the panel stays readable while you work; Pi's own `ctrl+o` still expands

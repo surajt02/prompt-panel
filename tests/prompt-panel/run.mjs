@@ -1377,6 +1377,114 @@ for (const glyphs of ["unicode", "ascii"]) {
   );
 }
 
+// --- Tool row order -----------------------------------------------------------
+// Pi runs a batch of tool calls in parallel, so a call that starts later can
+// finish first. Finished rows belong above the calls still running — that is
+// what the row at the bottom means — and each group keeps event order. A nested
+// call stays under the parent it is indented under.
+
+{
+  const tool = (id, name, status, extra = {}) => ({
+    id,
+    name,
+    args: { path: `${id}.ts` },
+    summary: `${id}.ts`,
+    status,
+    durationMs: status === "running" ? undefined : 120,
+    ...extra,
+  });
+  const view = (tools) =>
+    render(
+      makeState({
+        currentTurn: { ...makeState().currentTurn, tools },
+        pastTurns: [],
+        queued: [],
+        notices: [],
+      }),
+      cfg({ maxRows: 18 }),
+      100,
+    )
+      .map(plain)
+      // Tool rows are the ones carrying a tree connector.
+      .filter((line) => /^\s+[├└] [✓✗●○] /.test(line));
+  const names = (rows) =>
+    rows
+      .map((line) => /[✓✗●○] ([a-z]+)/.exec(line)?.[1] ?? "?")
+      .join(",");
+
+  const parallel = view([
+    tool("t1", "bash", "running"),
+    tool("t2", "read", "success"),
+  ]);
+  check(
+    "tool order: a finished call renders above a call still running",
+    names(parallel) === "read,bash",
+    JSON.stringify(parallel),
+  );
+  check(
+    "tool order: the running call takes the last connector",
+    parallel.length === 2 &&
+      /^\s+├ /.test(parallel[0]) &&
+      /^\s+└ /.test(parallel[1]),
+    JSON.stringify(parallel),
+  );
+
+  const grouped = view([
+    tool("t1", "bash", "running"),
+    tool("t2", "read", "success"),
+    tool("t3", "edit", "success"),
+    tool("t4", "grep", "running"),
+  ]);
+  check(
+    "tool order: each finished/running group keeps event order",
+    names(grouped) === "read,edit,bash,grep",
+    JSON.stringify(grouped),
+  );
+
+  const interrupted = view([
+    tool("t1", "bash", "running"),
+    tool("t2", "read", "interrupted"),
+  ]);
+  check(
+    "tool order: an interrupted call counts as finished",
+    names(interrupted) === "read,bash",
+    JSON.stringify(interrupted),
+  );
+
+  const nestedRows = view([
+    tool("t1", "read", "success", { summary: "top.ts" }),
+    tool("p1", "codemode", "running", { summary: "script.mjs" }),
+    tool("p1/1", "read", "success", {
+      summary: "child.ts",
+      parentToolCallId: "p1",
+    }),
+  ]);
+  const topIndex = nestedRows.findIndex((line) => line.includes("top.ts"));
+  const parentIndex = nestedRows.findIndex((line) => line.includes("script.mjs"));
+  const childIndex = nestedRows.findIndex((line) => line.includes("child.ts"));
+  check(
+    "tool order: a finished nested call stays right under its running parent",
+    topIndex >= 0 &&
+      parentIndex === topIndex + 1 &&
+      childIndex === parentIndex + 1 &&
+      /^\s{4}└ /.test(nestedRows[parentIndex]) &&
+      /^\s{6}└ /.test(nestedRows[childIndex]),
+    JSON.stringify(nestedRows),
+  );
+
+  const orphan = view([
+    tool("x1", "read", "success", {
+      summary: "orphan.ts",
+      parentToolCallId: "gone",
+    }),
+  ]);
+  check(
+    "tool order: a call whose parent is missing still renders",
+    orphan.length === 1 && orphan[0].includes("orphan.ts"),
+    JSON.stringify(orphan),
+  );
+}
+
 // --- Expansion mode ----------------------------------------------------------
 
 {
