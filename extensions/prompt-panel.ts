@@ -124,12 +124,30 @@ export interface DiffCount {
   removed: number;
 }
 
+/**
+ * A tool row's state. `streaming` is the call being written by the model: the
+ * row exists before Pi executes anything, because a fast tool would otherwise
+ * live for one frame. `running` is `execute()` itself.
+ */
+export type ToolStatus =
+  | "streaming"
+  | "running"
+  | "success"
+  | "error"
+  | "interrupted";
+
 export interface ToolRecord {
   id: string;
   name: string;
   args?: unknown;
   summary: string;
-  status: "running" | "success" | "error" | "interrupted";
+  status: ToolStatus;
+  /**
+   * Content-block index of a streamed call. Providers can send the arguments
+   * before the call id, so a streaming row is keyed by position until the id
+   * arrives; `tool_execution_start` then adopts it.
+   */
+  streamKey?: string;
   startedAt?: number;
   durationMs?: number;
   diff?: DiffCount | null;
@@ -240,9 +258,11 @@ interface Glyphs {
   cross: string;
   running: string;
   runningAlt: string;
-  thinking: string;
-  /** Alternate mark, so the glyph-mode row can pulse like a running tool. */
-  thinkingAlt: string;
+  /**
+   * The thinking mark, one per animation stage. Three stages against the
+   * running glyph's two keep the two animations from flipping in lockstep.
+   */
+  thinking: readonly [string, string, string];
   branch: string;
   last: string;
   dot: string;
@@ -262,8 +282,7 @@ function glyphsFor(mode: GlyphMode): Glyphs {
       cross: "x",
       running: "*",
       runningAlt: "o",
-      thinking: "*",
-      thinkingAlt: "o",
+      thinking: ["*", "o", "+"],
       branch: "|",
       last: "+",
       dot: ".",
@@ -280,8 +299,7 @@ function glyphsFor(mode: GlyphMode): Glyphs {
     cross: "✗",
     running: "●",
     runningAlt: "○",
-    thinking: "✻",
-    thinkingAlt: "✶",
+    thinking: ["✻", "✶", "✳"],
     branch: "├",
     last: "└",
     dot: "·",
@@ -525,7 +543,7 @@ export function settingsItems(config: PanelConfig): SettingItem[] {
     {
       id: "pulseMs",
       label: "pulseMs",
-      description: "How long the running glyph holds before alternating.",
+      description: "How long an animated glyph holds before its next stage.",
       currentValue: String(config.pulseMs),
       values: ["300", "600", "1000"],
     },
@@ -737,6 +755,21 @@ export function summarizeToolArgs(toolName: string, args: unknown): string {
   }
 
   if (summary !== undefined) return summary;
+  // A streamed call's arguments exist only as far as the model has written
+  // them: an empty object, or one whose values are all still empty, means the
+  // interesting field has not arrived yet. Rendering `{}` there would put
+  // punctuation on the row where the path is about to appear.
+  if (Array.isArray(args)) {
+    if (args.length === 0) return "";
+  } else if (isRecord(args)) {
+    const values = Object.values(args);
+    if (
+      values.length === 0 ||
+      values.every((value) => value === "" || value === null || value === undefined)
+    ) {
+      return "";
+    }
+  }
   if (typeof args === "string") return args.slice(0, 40);
   try {
     const json = JSON.stringify(args);
@@ -870,7 +903,7 @@ function runTotals(state: PanelState): RunRecord {
   const turn = state.currentTurn;
   if (turn) {
     totals.turns += 1;
-    totals.tools += turn.toolCount ?? (Array.isArray(turn.tools) ? turn.tools.length : 0);
+    totals.tools += turn.toolCount ?? executedToolCount(turn);
     if (typeof turn.elapsedMs === "number") {
       totals.durationMs += turn.elapsedMs;
     }
@@ -925,29 +958,45 @@ function formatTurnHeader(
       : glyphs.check;
   const token = turn.aborted ? "error" : running ? "accent" : "success";
 
+  let detailsText: string;
   if (width < 40) {
     const parts = [`turn ${turn.number}`];
-    if (turn.tools.length > 0) parts.push(pluralTools(turn.tools.length));
-    return `  ${paint(theme, token, mark)} ${paint(
-      theme,
-      "text",
-      parts.join(` ${glyphs.dot} `),
-    )}`;
+    const count = executedToolCount(turn);
+    if (count > 0) parts.push(pluralTools(count));
+    detailsText = parts.join(` ${glyphs.dot} `);
+  } else {
+    const details = [`turn ${turn.number}`];
+    if (turn.completed === true) {
+      const count = turn.toolCount ?? executedToolCount(turn);
+      if (count > 0) details.push(pluralTools(count));
+      if (typeof turn.elapsedMs === "number") {
+        details.push(formatDuration(turn.elapsedMs));
+      }
+    }
+    detailsText = details.join(` ${glyphs.dot} `);
   }
 
-  const details = [`turn ${turn.number}`];
-  if (turn.completed === true) {
-    const count = turn.toolCount ?? turn.tools.length;
-    if (count > 0) details.push(pluralTools(count));
-    if (typeof turn.elapsedMs === "number") {
-      details.push(formatDuration(turn.elapsedMs));
-    }
-  }
-  return `  ${paint(theme, token, mark)} ${paint(
+  const detailToken = width < 40 ? "text" : running ? "text" : "muted";
+  const plainHeader = `  ${mark} ${detailsText}`;
+  const header = `  ${paint(theme, token, mark)} ${paint(
     theme,
-    running ? "text" : "muted",
-    details.join(` ${glyphs.dot} `),
+    detailToken,
+    detailsText,
   )}`;
+  if (!config.showThinking) return header;
+  // A finished turn's thought is stale: the header keeps the tools, not the
+  // thought that produced them.
+  if (turn.completed === true || turn.aborted === true) return header;
+
+  const suffix = thinkingSuffix(
+    turn.thinking,
+    config,
+    state,
+    width - visibleWidth(plainHeader),
+    glyphs,
+  );
+  if (suffix === "") return header;
+  return header + paint(theme, "thinkingText", suffix);
 }
 
 /**
@@ -962,6 +1011,24 @@ function pulseOn(state: PanelState, config: PanelConfig): boolean {
   return Math.floor((tick * tickMs) / pulseMs) % 2 === 1;
 }
 
+/** Stages in the thinking cycle; one more than the running glyph's two. */
+const THINKING_STAGES = 3;
+
+/**
+ * Thinking-mark stage, 0..2. It advances once per `pulseMs` like the running
+ * glyph, but over three stages and half a stage out of step, so the mark and
+ * the tool dot never flip on the same frame — a shared rhythm made the row
+ * read as one blinking widget instead of a thought next to running work.
+ */
+function thinkingPhase(state: PanelState, config: PanelConfig): number {
+  if (!config.animate) return 0;
+  const tick = typeof state.tick === "number" ? state.tick : 0;
+  const tickMs = Math.max(1, Math.floor(config.tickMs));
+  const pulseMs = Math.max(tickMs, Math.floor(config.pulseMs));
+  const elapsed = tick * tickMs + Math.floor(pulseMs / 2);
+  return Math.floor(elapsed / pulseMs) % THINKING_STAGES;
+}
+
 /** Text after the last sentence terminator: the thought currently in progress. */
 function lastSentence(text: string): string {
   let index = -1;
@@ -973,61 +1040,58 @@ function lastSentence(text: string): string {
 }
 
 /**
- * The thinking row. It reads like a thought, not like a log tail: the clause
- * currently being written is cut at a word boundary with a trailing ellipsis,
- * the same way the pinned prompt is cut. A tail cut opened mid-phrase
- * (`…the caller passes down through`) and read as a fragment of a sentence
- * rather than as the sentence in progress.
+ * The thinking suffix that rides on the live turn's header instead of taking a
+ * row of its own: `turn 5 · ✻ Thinking · where the retry loop should go, then…`.
+ * Folding it into the header buys a row for tool activity, which is where the
+ * interesting motion is.
  *
- * Taking the head also means the row holds still while a long clause streams:
- * once the visible words stop changing the row stops changing, and a new clause
- * swaps it. The `thinkingMs` throttle keeps a short clause from flickering.
- */
-function thinkingPreview(
-  thinking: ThinkingRecord,
-  config: PanelConfig,
-  width: number,
-  glyphs: Glyphs,
-  mark: string = glyphs.thinking,
-): string | undefined {
-  const clean = collapseWhitespace(thinking.preview ?? thinking.buffer);
-  if (clean === "") return undefined;
-
-  const prefix = `    ${mark} Thinking ${glyphs.dot} `;
-  const limit = Math.max(1, Math.floor(config.thinkingPreviewChars));
-  const available = Math.max(1, width - visibleWidth(prefix));
-  const budget = Math.max(1, Math.min(limit, available));
-  // Prefer the clause in progress. Ending on a terminator leaves that clause
-  // empty, and the last complete one reads better than a blank row.
-  const clause = lastSentence(clean) || clean;
-  return `${prefix}${truncateAtWord(clause, budget, glyphs.ellipsis)}`;
-}
-
-/**
- * The live thinking row. `thinkingMode: "text"` shows the clause in progress;
- * `"glyph"` shows only a pulsing marker, for readers who find a truncated
- * sentence more distracting than no sentence at all. Both modes pulse the
- * leading mark, so the row reads as active whether or not it carries text.
+ * It still reads like a thought, not like a log tail: the clause currently being
+ * written is cut at a word boundary with a trailing ellipsis, the same way the
+ * pinned prompt is cut, so the head holds still while a long clause streams and
+ * only a new clause swaps it. `available` is the space the turn details left on
+ * the row; without room for the label the suffix is dropped, so a narrow panel
+ * keeps its turn row intact instead of crowding it.
  *
- * Both modes go quiet on an empty buffer: `message_start` creates a thinking
+ * `thinkingMode: "text"` shows the clause; `"glyph"` shows only the pulsing
+ * marker, for readers who find a truncated sentence more distracting than no
+ * sentence at all. Both pulse the mark, so the row reads as active either way,
+ * and both go quiet on an empty buffer: `message_start` creates a thinking
  * record for every assistant message, and a model that is not reasoning would
- * otherwise leave a permanent `Thinking` row behind.
+ * otherwise carry a permanent `Thinking` label.
  */
-function renderThinkingRow(
-  thinking: ThinkingRecord,
+function thinkingSuffix(
+  thinking: ThinkingRecord | null | undefined,
   config: PanelConfig,
   state: PanelState,
-  width: number,
+  available: number,
   glyphs: Glyphs,
-): string | undefined {
-  if (collapseWhitespace(thinking.preview ?? thinking.buffer) === "") {
-    return undefined;
+): string {
+  if (!thinking) return "";
+  const clean = collapseWhitespace(thinking.preview ?? thinking.buffer);
+  if (clean === "") return "";
+
+  const mark = glyphs.thinking[thinkingPhase(state, config)] ?? glyphs.thinking[0];
+  const separator = ` ${glyphs.dot} `;
+  const label = `${mark} Thinking`;
+  const used = visibleWidth(separator) + visibleWidth(label);
+  if (available < used) return "";
+
+  const budget = Math.min(
+    Math.max(1, Math.floor(config.thinkingPreviewChars)),
+    available - used - visibleWidth(separator),
+  );
+  // A two-word preview is noise; the marker alone still says it is thinking.
+  if (config.thinkingMode === "glyph" || budget < 4) {
+    return `${separator}${label}`;
   }
-  const mark = pulseOn(state, config) ? glyphs.thinkingAlt : glyphs.thinking;
-  if (config.thinkingMode === "glyph") {
-    return `    ${mark} Thinking`;
-  }
-  return thinkingPreview(thinking, config, width, glyphs, mark);
+  // Prefer the clause in progress. Ending on a terminator leaves that clause
+  // empty, and the last complete one reads better than a blank preview.
+  const clause = lastSentence(clean) || clean;
+  return `${separator}${label}${separator}${truncateAtWord(
+    clause,
+    budget,
+    glyphs.ellipsis,
+  )}`;
 }
 
 function formatArgsForPreview(args: unknown): string {
@@ -1104,6 +1168,9 @@ function renderToolRow(
 ): string {
   const glyphs = glyphsFor(config.glyphs);
   const running = tool.status === "running";
+  // A streamed row is the call being written, not the call executing: same live
+  // glyph, but no duration and no `running` label, since nothing runs yet.
+  const streaming = tool.status === "streaming";
   const statusGlyph =
     tool.status === "success"
       ? glyphs.check
@@ -1126,7 +1193,7 @@ function renderToolRow(
   let right = "";
   if (running) {
     right = paint(theme, "warning", "running");
-  } else if (width >= 60 && typeof tool.durationMs === "number") {
+  } else if (!streaming && width >= 60 && typeof tool.durationMs === "number") {
     right = paint(theme, "dim", formatDuration(tool.durationMs).padStart(6));
   }
   const rightWidth = right === "" ? 0 : visibleWidth(right);
@@ -1216,14 +1283,14 @@ function orderToolRows(tools: readonly ToolRecord[]): ToolRecord[] {
     nested.add(tool);
   }
 
-  // A group is active while it or any descendant is still executing.
+  // A group is active while it or any descendant is still streaming or running.
   const active = (
     tool: ToolRecord,
     seen: Set<ToolRecord> = new Set(),
   ): boolean => {
     if (seen.has(tool)) return false;
     seen.add(tool);
-    if (tool.status === "running") return true;
+    if (tool.status === "running" || tool.status === "streaming") return true;
     return (childrenByParent.get(tool) ?? []).some((child) =>
       active(child, seen),
     );
@@ -1265,15 +1332,6 @@ function renderTurn(
 
   if (width < 40) return lines;
 
-  // The thinking row exists to show what the agent is doing *now*. Once the turn
-  // finishes it is stale, so a settled panel keeps the tools but drops the thought.
-  const turnFinished = turn.completed === true || turn.aborted === true;
-  if (config.showThinking && turn.thinking && !turnFinished) {
-    const glyphs = glyphsFor(config.glyphs);
-    const row = renderThinkingRow(turn.thinking, config, state, width, glyphs);
-    if (row) lines.push(paint(theme, "thinkingText", row));
-  }
-
   const tools = orderToolRows(Array.isArray(turn.tools) ? turn.tools : []);
   for (let index = 0; index < tools.length; index++) {
     const tool = tools[index];
@@ -1285,7 +1343,9 @@ function renderTurn(
       }
     }
     lines.push(renderToolRow(tool, isLast, config, state, width, theme));
-    if (expanded) {
+    // Streamed arguments are still arriving, and a write's ones grow without
+    // bound; the row's summary is the readable part until the call executes.
+    if (expanded && tool.status !== "streaming") {
       lines.push(...renderExpandedToolDetails(tool, config, width, theme));
     }
   }
@@ -1639,6 +1699,90 @@ function extractThinkingFromMessage(message: unknown): string {
   return result;
 }
 
+/** A tool call as it exists inside a streaming assistant message. */
+export interface StreamedToolCall {
+  /** Position in the message's content array; stable while the call streams. */
+  index: number;
+  id: string;
+  name: string;
+  /** Partially parsed arguments: fields arrive as their JSON is streamed. */
+  args: unknown;
+}
+
+/**
+ * Tool calls visible in a (partial) assistant message. Pi streams the call
+ * before it executes anything, and `arguments` is the JSON parsed so far, so a
+ * row can show the path while the model is still writing the file content.
+ */
+export function extractToolCallsFromMessage(
+  message: unknown,
+): StreamedToolCall[] {
+  if (!isRecord(message) || !Array.isArray(message.content)) return [];
+  const calls: StreamedToolCall[] = [];
+  for (let index = 0; index < message.content.length; index++) {
+    const block = message.content[index];
+    if (!isRecord(block) || block.type !== "toolCall") continue;
+    const name = typeof block.name === "string" ? block.name : "";
+    // A row without a name cannot say what is being called yet; the next delta
+    // carries it, and `toolcall_start` always includes the name.
+    if (name === "") continue;
+    calls.push({
+      index,
+      id: typeof block.id === "string" ? block.id : "",
+      name,
+      args: block.arguments,
+    });
+  }
+  return calls;
+}
+
+/**
+ * Create or refresh the row for a streamed call. A provider can send a block's
+ * arguments before its id, so rows are matched by id first and by content index
+ * otherwise; once a call has executed its row is never turned back into a
+ * streaming one, because late snapshots repeat the whole block.
+ */
+export function upsertStreamedTool(
+  turn: TurnRecord,
+  call: StreamedToolCall,
+): void {
+  const streamKey = String(call.index);
+  let tool =
+    (call.id !== ""
+      ? turn.tools.find((entry) => entry.id === call.id)
+      : undefined) ??
+    turn.tools.find((entry) => entry.streamKey === streamKey);
+
+  if (!tool) {
+    turn.tools.push({
+      id: call.id,
+      name: call.name,
+      args: call.args,
+      summary: summarizeToolArgs(call.name, call.args),
+      status: "streaming",
+      streamKey,
+    });
+    return;
+  }
+
+  if (tool.status !== "streaming") return;
+  if (call.id !== "") tool.id = call.id;
+  tool.name = call.name;
+  tool.args = call.args;
+  tool.summary = summarizeToolArgs(call.name, call.args);
+  tool.streamKey = streamKey;
+}
+
+/**
+ * Tools whose execution began. A call can be streamed and then abandoned (a
+ * truncated message, an abort): it has a row but never ran, so it must not
+ * inflate the turn's tool count or the run totals.
+ */
+function executedToolCount(turn: TurnRecord | null | undefined): number {
+  const tools = Array.isArray(turn?.tools) ? turn.tools : [];
+  return tools.filter((tool) => typeof tool.startedAt === "number").length;
+}
+
 function extractResultText(result: unknown): string {
   if (result === undefined || result === null) return "";
   if (typeof result === "string") return result;
@@ -1783,7 +1927,7 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
     const run =
       state.run ?? (state.run = { turns: 0, tools: 0, durationMs: 0 });
     run.turns += 1;
-    run.tools += turn.toolCount ?? turn.tools.length;
+    run.tools += turn.toolCount ?? executedToolCount(turn);
     run.durationMs +=
       typeof turn.elapsedMs === "number" ? turn.elapsedMs : 0;
     if (turn.aborted) run.aborted = true;
@@ -1799,7 +1943,7 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
       );
     }
     if (typeof turn.toolCount !== "number") {
-      turn.toolCount = turn.tools.length;
+      turn.toolCount = executedToolCount(turn);
     }
     countTurn(turn);
   }
@@ -1823,7 +1967,7 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
       ...(state.pastTurns ?? []),
       {
         number: turn.number,
-        toolCount: turn.toolCount ?? turn.tools.length,
+        toolCount: turn.toolCount ?? executedToolCount(turn),
         durationMs: duration,
         aborted: turn.aborted === true,
       },
@@ -2191,7 +2335,7 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
     state.now = Date.now();
     turn.completed = true;
     turn.elapsedMs = Math.max(0, state.now - turn.startedAt);
-    turn.toolCount = turn.tools.length;
+    turn.toolCount = executedToolCount(turn);
     countTurn(turn);
     scheduleRender();
   });
@@ -2216,13 +2360,13 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
           turn.elapsedMs = Math.max(0, state.now - turn.startedAt);
         }
         for (const tool of turn.tools) {
-          if (tool.status === "running") {
+          if (tool.status === "running" || tool.status === "streaming") {
+            const startedAt = tool.startedAt;
             tool.status = "interrupted";
-            if (typeof tool.durationMs !== "number") {
-              tool.durationMs = Math.max(
-                0,
-                state.now - (tool.startedAt ?? turn.startedAt),
-              );
+            // A call that was still being written never ran, so it has no
+            // duration of its own to report.
+            if (typeof tool.durationMs !== "number" && typeof startedAt === "number") {
+              tool.durationMs = Math.max(0, state.now - startedAt);
             }
           }
         }
@@ -2262,6 +2406,27 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
     const update = event.assistantMessageEvent;
     if (!isRecord(update)) return;
     const type = update.type;
+
+    // A tool call becomes visible while the model is still writing its
+    // arguments, seconds before Pi executes it. Building the row from that
+    // stream is what makes `write`/`edit` (which execute in milliseconds)
+    // readable at all; `tool_execution_start` then takes the same row over.
+    if (
+      type === "toolcall_start" ||
+      type === "toolcall_delta" ||
+      type === "toolcall_end"
+    ) {
+      const calls = extractToolCallsFromMessage(
+        update.partial ?? event.message,
+      );
+      if (calls.length > 0) {
+        const turn = ensureTurn();
+        for (const call of calls) upsertStreamedTool(turn, call);
+        scheduleRender();
+      }
+      return;
+    }
+
     if (
       type !== "thinking_start" &&
       type !== "thinking_delta" &&
@@ -2322,16 +2487,29 @@ export default function promptPanelExtension(pi: ExtensionAPI): void {
   pi.on("tool_execution_start", (event, ctx) => {
     if (ctx.mode !== "tui") return;
     const turn = ensureTurn();
+    const id = String(event.toolCallId ?? "");
+    const name = String(event.toolName ?? "tool");
     const tool: ToolRecord = {
-      id: String(event.toolCallId ?? ""),
-      name: String(event.toolName ?? "tool"),
+      id,
+      name,
       args: event.args,
-      summary: summarizeToolArgs(String(event.toolName ?? "tool"), event.args),
+      summary: summarizeToolArgs(name, event.args),
       status: "running",
       startedAt: Date.now(),
       parentToolCallId: event.parentToolCallId,
     };
-    const existing = turn.tools.findIndex((entry) => entry.id === tool.id);
+    let existing =
+      id === "" ? -1 : turn.tools.findIndex((entry) => entry.id === id);
+    if (existing < 0) {
+      // The streamed row never learned its id (some providers stream arguments
+      // before the call id): adopt it instead of drawing the call twice.
+      existing = turn.tools.findIndex(
+        (entry) =>
+          entry.status === "streaming" &&
+          entry.id === "" &&
+          (entry.name === name || entry.name === ""),
+      );
+    }
     if (existing >= 0) turn.tools[existing] = tool;
     else turn.tools.push(tool);
     scheduleRender();

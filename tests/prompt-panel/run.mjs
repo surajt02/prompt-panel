@@ -48,6 +48,8 @@ const {
   countEditDiff,
   renderPanel,
   settingsItems,
+  extractToolCallsFromMessage,
+  upsertStreamedTool,
 } = mod;
 
 // Compact baseline: the shipped default mode, pinned explicitly so row-budget
@@ -164,6 +166,7 @@ function describeOverflow(lines, width) {
     "applySettingValue",
     "countEditDiff",
     "effectiveRowBudget",
+    "extractToolCallsFromMessage",
     "formatDuration",
     "isDisplayMode",
     "middleEllipsize",
@@ -172,6 +175,7 @@ function describeOverflow(lines, width) {
     "renderPanel",
     "settingsItems",
     "summarizeToolArgs",
+    "upsertStreamedTool",
   ].sort();
   const actual = Object.keys(mod)
     .filter((key) => key !== "default")
@@ -399,6 +403,75 @@ check(
     "summarizeToolArgs: fallback -> first 40 JSON chars",
     summarizeToolArgs("mystery", { a: 1 }).length <= 40 &&
       summarizeToolArgs("mystery", { a: 1 }).includes('"a"'),
+  );
+  check(
+    "summarizeToolArgs: arguments that have not streamed yet render nothing",
+    summarizeToolArgs("write", {}) === "" &&
+      summarizeToolArgs("bash", { command: "" }) === "" &&
+      summarizeToolArgs("edit", []) === "",
+    JSON.stringify([
+      summarizeToolArgs("write", {}),
+      summarizeToolArgs("bash", { command: "" }),
+      summarizeToolArgs("edit", []),
+    ]),
+  );
+}
+
+// ---- streamed tool calls ---------------------------------------------------
+// Pi streams a tool call before executing it, and `write`/`edit` execute in
+// milliseconds: without the stream the row would live for one frame.
+{
+  const calls = extractToolCallsFromMessage({
+    role: "assistant",
+    content: [
+      { type: "text", text: "writing it" },
+      { type: "toolCall", id: "c1", name: "write", arguments: { path: "a.ts" } },
+      { type: "toolCall", id: "c2", name: "", arguments: {} },
+    ],
+  });
+  check(
+    "stream: extraction keeps named tool calls with their content position",
+    calls.length === 1 &&
+      calls[0].index === 1 &&
+      calls[0].id === "c1" &&
+      calls[0].name === "write" &&
+      calls[0].args.path === "a.ts",
+    JSON.stringify(calls),
+  );
+  check(
+    "stream: extraction tolerates anything that is not a message",
+    extractToolCallsFromMessage(undefined).length === 0 &&
+      extractToolCallsFromMessage({ content: "x" }).length === 0 &&
+      extractToolCallsFromMessage({ content: null }).length === 0,
+  );
+
+  const turn = { number: 1, startedAt: 0, tools: [] };
+  upsertStreamedTool(turn, { index: 0, id: "", name: "write", args: { path: "a" } });
+  upsertStreamedTool(turn, {
+    index: 0,
+    id: "c1",
+    name: "write",
+    args: { path: "a/b.ts" },
+  });
+  check(
+    "stream: deltas update one row instead of appending one per delta",
+    turn.tools.length === 1 &&
+      turn.tools[0].id === "c1" &&
+      turn.tools[0].summary === "a/b.ts" &&
+      turn.tools[0].status === "streaming",
+    JSON.stringify(turn.tools),
+  );
+  turn.tools[0].status = "success";
+  upsertStreamedTool(turn, {
+    index: 0,
+    id: "c1",
+    name: "write",
+    args: { path: "a/b.ts", content: "late snapshot" },
+  });
+  check(
+    "stream: a late snapshot never turns an executed row back into a streamed one",
+    turn.tools[0].status === "success" && turn.tools[0].summary === "a/b.ts",
+    JSON.stringify(turn.tools),
   );
 }
 
@@ -1098,6 +1171,168 @@ for (const width of [10, 40, 60, 200]) {
   }
 }
 
+// ---- streamed rows in the live turn ----------------------------------------
+// The transcript shows a tool call while the model is still writing its
+// arguments. These cases pin the same behaviour in the panel: the row exists
+// before `tool_execution_start`, fills in as arguments stream, and is taken
+// over (never duplicated) when the call executes.
+{
+  const tempAgent = mkdtempSync(join(here, ".tmp-agent-streaming-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = tempAgent;
+  writeFileSync(
+    join(tempAgent, "prompt-panel.json"),
+    JSON.stringify({ display: "minimal", idleMode: "full" }),
+  );
+  try {
+    const handlers = new Map();
+    let widget;
+    const tui = { terminal: { rows: 24 }, requestRender() {} };
+    mod.default({
+      on(name, handler) {
+        handlers.set(name, handler);
+      },
+      registerCommand() {},
+    });
+    const ui = {
+      notify() {},
+      setWidget(_key, content) {
+        widget =
+          typeof content === "function" ? content(tui, theme) : content;
+      },
+      getToolsExpanded() {
+        return false;
+      },
+    };
+    const ctx = { mode: "tui", ui };
+    const call = async (name, event = {}) => {
+      const handler = handlers.get(name);
+      if (handler) await handler(event, ctx);
+    };
+    const stream = (type, block) =>
+      call("message_update", {
+        assistantMessageEvent: {
+          type,
+          partial: { role: "assistant", content: [block] },
+        },
+      });
+    const rows = () =>
+      widget.render(80).map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""));
+    const lines = () => rows().join("\n");
+
+    await call("session_start", { reason: "startup" });
+    await call("input", { source: "interactive", text: "update the fetch middleware" });
+    await call("agent_start", {});
+    await call("turn_start", { turnIndex: 0 });
+    await call("message_start", { message: { role: "assistant", content: [] } });
+
+    await stream("toolcall_start", {
+      type: "toolCall",
+      id: "call-1",
+      name: "write",
+      arguments: {},
+    });
+    const started = lines();
+    check(
+      "stream: the row appears while the call is still being written",
+      started.includes("write") && !started.includes("running"),
+      started,
+    );
+
+    await stream("toolcall_delta", {
+      type: "toolCall",
+      id: "call-1",
+      name: "write",
+      arguments: { path: "src/http/fetch.ts" },
+    });
+    const withPath = lines();
+    check(
+      "stream: the path fills in from the streamed arguments",
+      withPath.includes("fetch.ts"),
+      withPath,
+    );
+    check(
+      "stream: a streamed row is not labelled running and has no duration",
+      !withPath.includes("running") && !/\d+\.\d+s/.test(withPath),
+      withPath,
+    );
+
+    await call("tool_execution_start", {
+      toolCallId: "call-1",
+      toolName: "write",
+      args: { path: "src/http/fetch.ts", content: "abc" },
+    });
+    const executing = rows();
+    const writeRows = executing.filter((line) => line.includes("write"));
+    check(
+      "stream: execution takes the row over instead of adding a second one",
+      writeRows.length === 1 && lines().includes("running"),
+      lines(),
+    );
+
+    await call("tool_execution_end", {
+      toolCallId: "call-1",
+      toolName: "write",
+      args: { path: "src/http/fetch.ts", content: "abc" },
+      isError: false,
+      durationMs: 30,
+      result: { content: [{ type: "text", text: "wrote it" }] },
+    });
+    // A provider can repeat the whole block after the call finished.
+    await stream("toolcall_end", {
+      type: "toolCall",
+      id: "call-1",
+      name: "write",
+      arguments: { path: "src/http/fetch.ts", content: "abc" },
+    });
+    const settled = lines();
+    check(
+      "stream: a late snapshot never reopens an executed row",
+      settled.includes("0.0s") && !settled.includes("running"),
+      settled,
+    );
+
+    // A streamed call the turn never executed must not count as a tool.
+    await stream("toolcall_delta", {
+      type: "toolCall",
+      id: "call-2",
+      name: "edit",
+      arguments: { path: "src/http/fetch.ts" },
+    });
+    await call("turn_end", {});
+    const counted = lines();
+    check(
+      "stream: the turn counts executed tools, not abandoned streamed calls",
+      counted.includes("1 tool") && !counted.includes("2 tools"),
+      counted,
+    );
+
+    // Some providers stream the arguments before the call id.
+    await call("turn_start", { turnIndex: 1 });
+    await stream("toolcall_start", {
+      type: "toolCall",
+      id: "",
+      name: "edit",
+      arguments: { path: "src/http/fetch.ts" },
+    });
+    await call("tool_execution_start", {
+      toolCallId: "call-9",
+      toolName: "edit",
+      args: { path: "src/http/fetch.ts" },
+    });
+    const adopted = rows();
+    check(
+      "stream: an id-less streamed row is adopted at execution, not duplicated",
+      adopted.filter((line) => line.includes("edit")).length === 1,
+      adopted.join("\n"),
+    );
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(tempAgent, { recursive: true, force: true });
+  }
+}
+
 // --- Review regression cases -------------------------------------------------
 // These assert rendered CONTENT, not just width safety. The final per-line clip
 // makes every row "fit" even when its layout math is wrong, so a width-only
@@ -1738,7 +1973,7 @@ for (const glyphs of ["unicode", "ascii"]) {
   const marker = glyphRow(thought);
   check(
     "thinkingMode=glyph shows the marker with no preview text",
-    marker === "    ✻ Thinking" && !marker.includes("retry"),
+    marker.endsWith(" · ✻ Thinking") && !marker.includes("retry"),
     JSON.stringify(marker),
   );
 
@@ -1758,7 +1993,7 @@ for (const glyphs of ["unicode", "ascii"]) {
 
   check(
     "thinkingMode=glyph follows the ascii glyph set",
-    glyphRow(thought, { glyphs: "ascii" }) === "    * Thinking",
+    glyphRow(thought, { glyphs: "ascii" }).endsWith(" . * Thinking"),
     JSON.stringify(glyphRow(thought, { glyphs: "ascii" })),
   );
 
@@ -1797,15 +2032,117 @@ for (const glyphs of ["unicode", "ascii"]) {
   const textPulsed = [0, 3].map((tick) => textPulseRow(tick));
   check(
     "the text preview pulses its glyph at the pulse rate",
-    textPulsed[0].startsWith("    ✻ Thinking · ") &&
-      textPulsed[1].startsWith("    ✶ Thinking · ") &&
+    textPulsed[0].includes("✻ Thinking · ") &&
+      textPulsed[1].includes("✶ Thinking · ") &&
       textPulsed[1].includes("retry loop"),
     JSON.stringify(textPulsed),
   );
   check(
     "the text preview glyph freezes when animate is off",
-    textPulseRow(3, { animate: false }).startsWith("    ✻ Thinking · "),
+    textPulseRow(3, { animate: false }).includes("✻ Thinking · "),
     JSON.stringify(textPulseRow(3, { animate: false })),
+  );
+
+  // A third stage, half a stage out of step with the running glyph: two marks
+  // flipping on the same frame made the row read as one blinking widget.
+  const marks = (tick) => {
+    const match = /^\s*(\S) turn \d+ · (\S) Thinking/.exec(textPulseRow(tick));
+    return match ? { run: match[1], thinking: match[2] } : { run: "?", thinking: "?" };
+  };
+  const stages = [0, 3, 6].map((tick) => marks(tick).thinking);
+  check(
+    "the thinking mark cycles three stages, not two",
+    stages.join(",") === "✻,✶,✳",
+    JSON.stringify(stages),
+  );
+
+  const steps = [];
+  for (let tick = 1; tick <= 15; tick++) {
+    const before = marks(tick - 1);
+    const after = marks(tick);
+    steps.push({
+      tick,
+      run: before.run !== after.run,
+      thinking: before.thinking !== after.thinking,
+    });
+  }
+  check(
+    "the thinking mark and the running glyph never flip on the same frame",
+    steps.every((step) => !(step.run && step.thinking)) &&
+      steps.some((step) => step.thinking) &&
+      steps.some((step) => step.run),
+    JSON.stringify(steps.filter((step) => step.run || step.thinking)),
+  );
+}
+
+// ---- thinking rides on the turn header --------------------------------------
+// Folding the thought into the live turn's header buys a row for tool activity.
+{
+  const base = makeState();
+  const thought = {
+    buffer: "the retry loop should go before the backoff, then the middleware",
+    done: false,
+  };
+  const at = (state, width, config = {}) =>
+    renderPanel(
+      state,
+      { config: { ...DEFAULT_CONFIG, display: "compact", ...config }, terminalRows: 40 },
+      width,
+      theme,
+    ).map(plain);
+  const thoughtState = (over = {}) =>
+    makeState({
+      currentTurn: { ...base.currentTurn, thinking: thought, ...over },
+    });
+
+  const lines = at(thoughtState(), 100);
+  const thinkingLines = lines.filter((line) => line.includes("Thinking"));
+  check(
+    "thinking rides on the live turn header, not a row of its own",
+    thinkingLines.length === 1 &&
+      thinkingLines[0].includes("turn 2") &&
+      thinkingLines[0].includes("retry loop") &&
+      /^[●○] turn 2/.test(thinkingLines[0].trimStart()),
+    JSON.stringify(lines),
+  );
+  check(
+    "the header row is the thinking row: no separate indented thought line",
+    !lines.some((line) => line.trimStart().startsWith("✻")),
+    JSON.stringify(lines),
+  );
+
+  // No room for a preview: keep the label, drop the text.
+  const tight = at(
+    makeState({
+      currentTurn: { ...base.currentTurn, tools: [], thinking: thought },
+    }),
+    26,
+  );
+  const tightThinking = tight.find((line) => line.includes("Thinking")) ?? "";
+  check(
+    "a narrow row keeps `Thinking` and drops the preview",
+    tightThinking.endsWith("✻ Thinking") && !tightThinking.includes("retry"),
+    JSON.stringify(tight),
+  );
+
+  // No room even for the label: the turn row stays intact.
+  const tooTight = at(
+    makeState({
+      currentTurn: { ...base.currentTurn, tools: [], thinking: thought },
+    }),
+    22,
+  ).join("\n");
+  check(
+    "a row too narrow for the label drops the thinking entirely",
+    tooTight.includes("turn 2") && !tooTight.includes("Thinking"),
+    tooTight,
+  );
+
+  check(
+    "showThinking=false removes the inline suffix",
+    !at(thoughtState(), 100, { showThinking: false })
+      .join("\n")
+      .includes("Thinking"),
   );
 }
 

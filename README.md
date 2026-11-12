@@ -11,8 +11,7 @@ A [Pi](https://pi.dev) extension that puts two things directly above the prompt 
 ❯ refactor the auth middleware to use the new token store
   ✓ turn 3 · 2 tools · 8.4s
   ✓ turn 4 · 1.1s
-  ● turn 5
-    ✻ Thinking · where the retry loop should go, then whether…
+  ● turn 5 · ✻ Thinking · where the retry loop should go, then whether…
     ├ ✓ read  src/…/middleware.ts                          0.1s
     ├ ✓ edit  src/http/fetch.ts                        +9 −2  0.3s
     └ ● bash  pnpm test                                  running
@@ -76,12 +75,12 @@ malformed file produces one error notification and then defaults.
 | `maxRows` | `"auto"` | `"auto"` = 30% of the terminal height, clamped 6–18. A number is clamped 1–48. |
 | `display` | `"compact"` | How much of the run to show: `"minimal"` = the prompt and the live turn; `"compact"` = the live turn plus the previous two, one line per tool; `"expanded"` = every retained turn (up to 500), with tool arguments and result previews. Pi's `ctrl+o` shows the `expanded` view while it is on without changing this value. |
 | `showPrompt` | `true` | Show the pinned prompt row. |
-| `showThinking` | `true` | Show the thinking row while a turn is live. |
-| `thinkingMode` | `"text"` | How that row reads: `"text"` = the clause in progress, cut at a word boundary; `"glyph"` = just a pulsing `✻ Thinking` marker, no preview text. |
+| `showThinking` | `true` | Show thinking on the live turn's header. |
+| `thinkingMode` | `"text"` | How it reads there: `"text"` = the clause in progress, cut at a word boundary; `"glyph"` = just a pulsing `✻ Thinking` label, no preview text. |
 | `thinkingPreviewChars` | `60` | Width budget of the thinking preview, clipped at a word boundary. |
 | `animate` | `true` | Pulse the running glyph. `false` freezes it and stops the timer. |
 | `tickMs` | `200` | Refresh cadence while a run is active. |
-| `pulseMs` | `600` | How long the running glyph holds before alternating. |
+| `pulseMs` | `600` | How long an animated glyph holds before its next stage. The thinking mark cycles three stages, the running glyph two. |
 | `thinkingMs` | `500` | How often the thinking preview advances. |
 | `idleMode` | `"glyph"` | What stays on screen once nothing is running: `"glyph"` = one row of run totals (`✓ 5 turns · 13 tools · 54s`), expandable back to the full tree; `"full"` = always the finished tree; `"hidden"` = nothing (also expandable). It applies to `minimal` and `compact`; `expanded` always keeps the tree. |
 | `glyphs` | `"unicode"` | `"ascii"` for terminals without Unicode glyph support. |
@@ -107,7 +106,7 @@ dropped the next time anything is saved.
 | `/panel status` | Report enabled state, row budget, display mode, idle mode, and config path. |
 | `/panel on` · `off` | Toggle the panel. |
 | `/panel rows <n\|auto>` | Set the row budget. |
-| `/panel thinking on\|off` | Toggle the thinking row. |
+| `/panel thinking on\|off` | Toggle the thinking preview. |
 | `/panel ascii on\|off` | Switch glyph set. |
 | `/panel display minimal\|compact\|expanded` | Set the display mode. |
 | `/panel idle full\|glyph\|hidden` | Set what the panel keeps while idle. |
@@ -135,26 +134,40 @@ the value still applies for the session and you are warned once.
   | `expanded` | every turn the session still retains, with tool arguments and results |
 
   Each completed turn compresses to one line (`✓ turn 3 · 2 tools · 8.4s`), newest at the
-  bottom; the live turn keeps its thinking row and tool rows in every mode. The mode decides the
+  bottom; the live turn keeps its thinking header and tool rows in every mode. The mode decides the
   depth (Pi's `ctrl+o` overlays `expanded` on top of it, see below): scrolling moves the window
   inside it and never adds a turn, so the panel's height only changes when the mode, budget, or
   run state changes. Turns are retained as compact records (number, tool count, duration) up to
   500; turn numbers stay monotonic across prompts and never gap.
-- **Thinking** is a single row that shows the clause currently being written, cut at a word
-  boundary with a trailing ellipsis — the same cut the pinned prompt uses — so it reads as the
-  thought in progress rather than as a tail fragment (`…the caller passes down through`). The head
-  only changes when new words fit, so a long clause holds still instead of crawling, and the row
-  advances at most once per `thinkingMs`. Its leading `✻` pulses with the run in both modes
-  (frozen when `animate` is off), independent of the `thinkingMs` text cadence.
-  `thinkingMode: "glyph"` drops the text entirely and leaves just the pulsing `✻ Thinking` marker,
-  for readers who would rather see that something is happening than read a clipped sentence. The
-  row disappears when the turn finishes, and stays hidden until the thought has content.
+- **Thinking** rides on the live turn's header row — `● turn 5 · ✻ Thinking · where the retry
+  loop should go, then whether the…` — instead of taking a row of its own, so the panel spends
+  that row on tool activity. The preview is the clause currently being written, cut at a word
+  boundary with a trailing ellipsis, the same cut the pinned prompt uses, so it reads as the
+  thought in progress rather than as a tail fragment. The head only changes when new words fit,
+  so a long clause holds still instead of crawling, and it advances at most once per `thinkingMs`.
+  Its mark cycles `✻` → `✶` → `✳`, one stage per `pulseMs` and half a stage out of step with the
+  running glyph's two-frame flip (frozen when `animate` is off), independent of the `thinkingMs`
+  text cadence — an animation that flipped on the same frame as the tool dot read as one blinking
+  widget rather than a thought beside running work. It is measured against what the turn details leave on the row: too
+  little room for a preview keeps just `✻ Thinking`, and too little for even that drops the
+  suffix, so a narrow panel keeps its turn row intact. `thinkingMode: "glyph"` never shows the
+  text, for readers who would rather see that something is happening than read a clipped
+  sentence. The suffix disappears when the turn finishes, and stays hidden until the thought has
+  content.
 - **Tools** show a status glyph (`✓` / `✗` / pulsing `●`), the tool name, a one-line argument
   summary, and a duration. Paths ellipsize in the middle so the filename survives; every other
   summary ellipsizes at the end. Nested calls (`parentToolCallId`) indent one level and stay under
   the parent they belong to. A batch runs in parallel, so a later call can finish first: finished
   rows stack above the calls still running — the running row is the last one, on the `└`
   connector — and each of those two groups keeps event order.
+- **A row appears while the call is still being written**, which is the only way a fast tool is
+  readable at all. The name arrives with the call's first token and the summary — path, command,
+  script line — fills in as the arguments stream, so a `write` or `edit`, whose execution takes
+  milliseconds, is on screen for the seconds the model spends composing it instead of for one
+  frame. Such a row carries the live glyph and no duration; it is not labelled `running`, because
+  nothing executes yet. Pi then executes that same row — a second one never appears — and it
+  gains its duration and diffstat when it finishes. In `expanded` mode the argument preview waits
+  until execution starts, so a growing file body cannot crawl under the row.
 - **Expansion** is the `expanded` mode: arguments up to 3 wrapped lines plus a result preview up
   to 5 lines, errors in the error colour, and every retained turn. `minimal` and `compact` keep
   one line per tool, so the panel stays readable while you work. Pi's own `ctrl+o` (whatever
